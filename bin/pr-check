@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# PR_CHECK CLI POSIX 包装：直接调用同目录的 pr_check_cli.py（无需安装）。
+# Windows 用户请使用：python bin/pr_check_cli.py <args>
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec python "$DIR/pr_check_cli.py" "$@"
