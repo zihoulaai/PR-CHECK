@@ -169,7 +169,7 @@ flowchart TD
 - **统一错误格式** `{error:{code,message}}`，绝不泄露 Token / 堆栈；退出码 0（成功）/ 2（`INVALID_REQUEST`）/ 3（`NOT_CONFIGURED`）/ 4（`GIT_*`，本地 Git 不可用/鉴权/无权限/未找到）/ 5（`LLM_*`）/ 6（`KB_UNAVAILABLE`）/ 7（`GATE_FAILED`）/ 99（`INTERNAL_ERROR`/`SECURITY_ERROR`）。
 - **Evidence 等级 A/B/C/N**：A/B 须 `source_refs` 非空；C 仅弱化表述；N 须「无法判断」。
 - **知识库检索按 `project` 强制过滤**，跨项目拒绝。
-- **失败降级**：Git 失败即终止；KB 失败降级为基础自检（报告无知识段落）；LLM 失败整体失败（不返回半成品）。
+- **失败降级**：Git 失败即终止；KB 失败降级为基础自检（报告无知识段落）；LLM **未配置**时降级为基础风险报告（无 LLM 综合段落）；LLM **已配置但调用失败**则整体失败（不返回半成品）。
 
 ---
 

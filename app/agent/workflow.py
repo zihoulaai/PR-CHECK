@@ -19,7 +19,7 @@ from app.domain.schemas import (
     CheckReport, DocCheckItem, KBHit, KbSource, MRRef, PRMetadata, RiskItem,
     RuleItem, TechDebtItem,
 )
-from app.errors import KbError, LlmInvalidOutput, NotConfiguredError
+from app.errors import KbError, LlmInvalidOutput
 from app.parser.change_profile import build_change_profile, select_focused_diff
 from app.parser.diff_parser import parse_diff
 
@@ -56,12 +56,17 @@ def run_check(cred: GitCredential, mr_ref: MRRef) -> CheckReport:
     else:
         kb_status = KbStatus.NOT_CONFIGURED
 
-    # 4) LLM 综合（summary_only 不进完整 LLM 分析）
-    if mode == AnalysisMode.SUMMARY_ONLY:
-        report = _build_summary_only(pr, profile, kb_status)
+    # 4) LLM 综合（summary_only 或 LLM 未配置时，降级为基础风险报告）
+    effective_mode = mode
+    if mode != AnalysisMode.SUMMARY_ONLY and container.llm is None:
+        effective_mode = AnalysisMode.SUMMARY_ONLY
+
+    if effective_mode == AnalysisMode.SUMMARY_ONLY:
+        report = _build_summary_only(
+            pr, profile, kb_status, mode=effective_mode,
+            degraded_no_llm=(mode != AnalysisMode.SUMMARY_ONLY),
+        )
     else:
-        if container.llm is None:
-            raise NotConfiguredError("LLM 未配置，无法生成完整自检报告。")
         diff_for_llm = diff_text if mode == AnalysisMode.FULL \
             else select_focused_diff(parsed, profile)
         system = build_system_prompt()
@@ -128,7 +133,10 @@ def run_check_from_diff(
         effective_mode = AnalysisMode.SUMMARY_ONLY
 
     if effective_mode == AnalysisMode.SUMMARY_ONLY:
-        report = _build_summary_only(pr, profile, kb_status, mode=effective_mode)
+        report = _build_summary_only(
+            pr, profile, kb_status, mode=effective_mode,
+            degraded_no_llm=(mode != AnalysisMode.SUMMARY_ONLY),
+        )
     else:
         diff_for_llm = diff_text if mode == AnalysisMode.FULL \
             else select_focused_diff(parsed, profile)
@@ -179,10 +187,14 @@ def _assemble(pr, profile, sections, kb_hits, mode, kb_status) -> CheckReport:
     )
 
 
-def _build_summary_only(pr, profile, kb_status, *, mode: AnalysisMode | None = None) -> CheckReport:
-    """Large PR：仅变更摘要 + 基础风险 + 人工 Checklist，不做项目规范/历史债务强匹配。"""
+def _build_summary_only(pr, profile, kb_status, *, mode: AnalysisMode | None = None,
+                        degraded_no_llm: bool = False) -> CheckReport:
+    """Large PR 或 LLM 未配置：仅变更摘要 + 基础风险 + 人工 Checklist。
+
+    degraded_no_llm=True 表示本应深度分析但因 LLM 未配置而降级，摘要会注明原因。
+    """
     risks: list[RiskItem] = []
-    if any(t.value for t in profile.high_impact_features):
+    if not degraded_no_llm and any(t.value for t in profile.high_impact_features):
         risks.append(RiskItem(
             level=RiskLevel.LOW, text="本次 PR 规模较大，已仅对重点变更做辅助分析，不代表完成完整代码审查。",
             evidence_level=EvidenceLevel.C, source_refs=[],
@@ -194,20 +206,23 @@ def _build_summary_only(pr, profile, kb_status, *, mode: AnalysisMode | None = N
         ))
     return CheckReport(
         meta=_meta(pr, profile, mode or AnalysisMode.SUMMARY_ONLY, kb_status),
-        summary=_summary_from_profile(pr, profile),
+        summary=_summary_from_profile(pr, profile, degraded_no_llm=degraded_no_llm),
         doc_check=[], risk=risks, project_rules=[], tech_debt=[],
         manual_checklist=_default_checklist(),
         kb_sources=[],
     )
 
 
-def _summary_from_profile(pr, profile) -> str:
+def _summary_from_profile(pr, profile, *, degraded_no_llm: bool = False) -> str:
     parts = [f"本次 PR「{pr.title}」共变更 {profile.changed_files} 个文件、{profile.changed_lines} 行。"]
     if profile.change_types:
         parts.append("变更类型：" + "、".join(t.value for t in profile.change_types) + "。")
     if profile.modules:
         parts.append("涉及模块：" + "、".join(profile.modules) + "。")
-    parts.append("因规模超过深度分析范围，本报告仅提供变更摘要与基础自查提醒，不代表已完成代码审查。")
+    if degraded_no_llm:
+        parts.append("LLM 未配置，已降级为仅基础风险自检（无 LLM 综合段落）；其余段落缺失不代表无问题，请结合人工审查。")
+    else:
+        parts.append("因规模超过深度分析范围，本报告仅提供变更摘要与基础自查提醒，不代表已完成代码审查。")
     return "".join(parts)
 
 

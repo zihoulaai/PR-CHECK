@@ -33,10 +33,15 @@ class LLMClientImpl:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
+        attempts = max(1, self.max_retries)
         last_err: Exception | None = None
-        for _ in range(max(1, self.max_retries)):
+        for _ in range(attempts):
             try:
-                with httpx.Client(timeout=self.timeout) as c:
+                # 连接超时单独设短（10s），快速暴露“网络不可达/域名解析失败/连接被拒”；
+                # 读超时用用户配置时长（self.timeout），容纳慢模型的长生成。
+                with httpx.Client(
+                    timeout=httpx.Timeout(connect=10, read=self.timeout, write=30, pool=10)
+                ) as c:
                     resp = c.post(
                         f"{self.base_url}/chat/completions",
                         headers={"Authorization": f"Bearer {self.api_key}",
@@ -62,12 +67,26 @@ class LLMClientImpl:
                 return content
             except (LlmRateLimited, LlmTimeout, LlmInvalidOutput, LlmUnavailable):
                 raise
+            except (httpx.ConnectTimeout, httpx.ConnectError) as exc:
+                # 网络层不可达：明确“模型无法访问”，与读超时区分
+                last_err = exc
+                continue
+            except httpx.ReadTimeout as exc:
+                last_err = exc
+                continue
             except httpx.TimeoutException as exc:
                 last_err = exc
                 continue
             except httpx.HTTPError as exc:
                 last_err = exc
                 continue
-        raise LlmTimeout(f"LLM 请求多次失败：{last_err}") if isinstance(
-            last_err, httpx.TimeoutException) else LlmUnavailable(
-            f"LLM 请求失败：{last_err}")
+        # 根据最后的错误类型给出清晰、可诊断的信息
+        if isinstance(last_err, (httpx.ConnectTimeout, httpx.ConnectError)):
+            raise LlmUnavailable(
+                f"无法连接 LLM 服务（网络不可达 / 域名解析失败 / 连接被拒）：{last_err}")
+        if isinstance(last_err, httpx.ReadTimeout):
+            raise LlmTimeout(
+                f"LLM 响应超时（模型可能较慢或生成内容过长）：{last_err}；"
+                f"可增大 LLM_TIMEOUT_SECONDS（当前 {self.timeout}s）或换用更快的模型。")
+        word = "多次" if attempts > 1 else "一次"
+        raise LlmUnavailable(f"LLM 请求{word}失败：{last_err}")

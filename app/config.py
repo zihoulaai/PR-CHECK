@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_model: str | None = None
     llm_api_key: str | None = None
-    llm_timeout_seconds: int = 60
+    llm_timeout_seconds: int = 120
     llm_max_retries: int = 1
 
     # KB
