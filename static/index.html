@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PR 提交前置自检</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root{
+      --primary:#4F46E5; --primary2:#2563EB; --primary3:#0EA5E9;
+      --bg1:#F1F5F9; --bg2:#FFFFFF; --bg3:#EEF2FF;
+      --text:#0F172A; --muted:#475569; --faint:#94A3B8;
+    }
+    body{
+      font-family:"PingFang SC","Microsoft YaHei",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+      background:linear-gradient(135deg,#EEF2FF 0%,#F1F5F9 45%,#FFFFFF 100%);
+      color:var(--text); min-height:100vh;
+    }
+    .glass{ background:rgba(255,255,255,0.65); backdrop-filter:blur(14px);
+      border:1px solid rgba(255,255,255,0.6); box-shadow:0 10px 30px rgba(79,70,229,0.08); }
+    .card{ border-radius:18px; }
+    .btn-primary{ background:linear-gradient(135deg,var(--primary),var(--primary2));
+      color:#fff; transition:transform .15s ease, box-shadow .15s ease; }
+    .btn-primary:hover{ transform:translateY(-1px); box-shadow:0 8px 22px rgba(37,99,235,.35); }
+    .btn-primary:disabled{ opacity:.55; cursor:not-allowed; transform:none; }
+    .badge{ display:inline-flex; align-items:center; padding:2px 10px; border-radius:999px;
+      font-size:12px; font-weight:600; }
+    .ev-A{ background:rgba(22,163,74,.12); color:#16A34A; }
+    .ev-B{ background:rgba(37,99,235,.12); color:#2563EB; }
+    .ev-C{ background:rgba(217,119,6,.12); color:#D97706; }
+    .ev-N{ background:rgba(100,116,139,.14); color:#64748B; }
+    .fade-in{ animation:fade .4s ease both; }
+    @keyframes fade{ from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:none;} }
+    .skel{ background:linear-gradient(90deg,#eef2ff,#e2e8f0,#eef2ff); background-size:200% 100%;
+      animation:sk 1.2s infinite; border-radius:8px; }
+    @keyframes sk{ 0%{background-position:200% 0;} 100%{background-position:-200% 0;} }
+    table{ width:100%; border-collapse:collapse; }
+    th,td{ text-align:left; padding:8px 10px; border-bottom:1px solid rgba(148,163,184,.2); font-size:13px; }
+    th{ color:var(--muted); font-weight:600; }
+    .scroll-x{ overflow-x:auto; }
+    details>summary{ cursor:pointer; color:var(--primary2); font-weight:600; }
+  </style>
+</head>
+<body class="p-4 md:p-8">
+  <div class="max-w-6xl mx-auto space-y-5">
+    <!-- 顶部栏 -->
+    <header class="glass card p-5 flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <h1 class="text-2xl font-semibold tracking-tight">PR 提交前置自检</h1>
+        <p class="text-sm text-[var(--muted)] mt-1">提交前轻量辅助自检 · 不替代人工 Code Review</p>
+      </div>
+      <div id="statusBar" class="flex gap-2 text-xs"></div>
+    </header>
+
+    <!-- 设置 / 连接 -->
+    <section class="glass card p-5 space-y-3">
+      <div class="flex items-center justify-between">
+        <h2 class="text-base font-semibold">连接设置</h2>
+        <button id="toggleGitForm" class="text-sm text-[var(--primary2)] font-semibold">+ 配置 GitLab</button>
+      </div>
+      <div id="gitForm" class="hidden space-y-2">
+        <input id="glName" placeholder="名称（如 公司 GitLab）" class="w-full rounded-lg border px-3 py-2 text-sm" />
+        <input id="glUrl" placeholder="Base URL（https://gitlab.example.com）" class="w-full rounded-lg border px-3 py-2 text-sm" />
+        <input id="glToken" type="password" placeholder="Private Token（仅后端加密存储）" class="w-full rounded-lg border px-3 py-2 text-sm" />
+        <button id="saveGit" class="btn-primary rounded-lg px-4 py-2 text-sm">保存</button>
+        <p class="text-xs text-[var(--faint)]">Token 仅用于后端 Git API，加密存储，不进入日志 / LLM / 报告。</p>
+      </div>
+    </section>
+
+    <!-- 选择区 -->
+    <section class="glass card p-5 grid md:grid-cols-2 gap-5">
+      <div class="space-y-3">
+        <label class="text-sm font-semibold">项目 / 仓库</label>
+        <select id="projectSel" class="w-full rounded-lg border px-3 py-2 text-sm">
+          <option value="">— 加载中 —</option>
+        </select>
+        <label class="text-sm font-semibold">MR / PR</label>
+        <select id="mrSel" class="w-full rounded-lg border px-3 py-2 text-sm">
+          <option value="">— 请先选择项目 —</option>
+        </select>
+        <details>
+          <summary class="text-sm">手工输入 project_path + mr_iid</summary>
+          <div class="mt-2 space-y-2">
+            <input id="manualPath" placeholder="team/order-service" class="w-full rounded-lg border px-3 py-2 text-sm" />
+            <input id="manualIid" type="number" placeholder="MR iid，如 1234" class="w-full rounded-lg border px-3 py-2 text-sm" />
+          </div>
+        </details>
+      </div>
+      <div class="space-y-3">
+        <div class="rounded-lg bg-[var(--bg3)] p-4 text-sm" id="mrSummary">
+          <p class="text-[var(--muted)]">选择 MR 后展示摘要信息。</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="startBtn" class="btn-primary rounded-lg px-5 py-2.5 text-sm font-semibold">开始自检</button>
+          <span id="loading" class="hidden text-sm text-[var(--muted)]">分析中…</span>
+        </div>
+        <div id="errorBanner" class="hidden rounded-lg bg-red-50 text-red-700 px-3 py-2 text-sm"></div>
+        <p class="text-xs text-[var(--faint)]">PR 代码变更将提交至分析服务进行处理，请遵守企业代码与数据安全规范。</p>
+      </div>
+    </section>
+
+    <!-- 报告区 -->
+    <section id="reportArea" class="hidden space-y-4"></section>
+
+    <!-- 底部声明 -->
+    <footer class="text-xs text-[var(--faint)] leading-relaxed">
+      免责声明：本工具用于 PR 提交前辅助自检，不代表正式 Code Review，也不代表代码不存在 Bug。
+      无证据不下项目特定强结论；知识库未检索到相关信息时将明确标注「无法判断」。
+    </footer>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const evBadge = (lvl) => `<span class="badge ev-${lvl}">[${lvl}]</span>`;
+const refsStr = (refs) => refs && refs.length ? refs.map(r=>`<a class="text-[var(--primary2)]" href="#src-${r}">[${r}]</a>`).join(" ") : "—";
+
+async function api(path, opts){ const r = await fetch(path, opts); if(!r.ok){ const e=await r.json().catch(()=>({})); throw new Error((e.error&&e.error.message)||"请求失败"); } return r.json(); }
+
+function renderStatus(s){
+  const mk=(label,ok)=>`<span class="badge ${ok?'ev-A':'ev-N'}">${label}: ${ok?'已配置':'未配置'}</span>`;
+  $("statusBar").innerHTML = mk("GitLab",s.gitlab.configured)+mk("LLM",s.llm.configured)+mk("KB",s.kb.configured);
+}
+
+async function loadSettings(){
+  try{ const s = await api("/settings"); renderStatus(s);
+    if(s.gitlab.configured){ $("projectSel").innerHTML='<option value="">— 选择项目 —</option>'+s.gitlab.connections.map(c=>`<option value="${c.id}">${c.name}</option>`).join(""); loadProjects(); }
+    else { $("projectSel").innerHTML='<option value="">请先配置 GitLab</option>'; }
+  }catch(e){ showError(e.message); }
+}
+
+async function loadProjects(){
+  try{ const d = await api("/projects?per_page=50");
+    $("projectSel").innerHTML='<option value="">— 选择项目 —</option>'+d.items.map(p=>`<option value="${p.id}">${p.path_with_namespace||p.path}</option>`).join("");
+  }catch(e){ showError(e.message); }
+}
+
+async function loadMrs(){
+  const pid = $("projectSel").value; if(!pid) return;
+  try{ const d = await api(`/projects/${pid}/mrs?per_page=50`);
+    $("mrSel").innerHTML='<option value="">— 选择 MR —</option>'+d.items.map(m=>`<option value="${m.iid}">#${m.iid} ${m.title}</option>`).join("");
+  }catch(e){ showError(e.message); }
+}
+
+$("projectSel").addEventListener("change", ()=>{ loadMrs(); $("mrSummary").innerHTML='<p class="text-[var(--muted)]">选择 MR 后展示摘要信息。</p>'; });
+$("mrSel").addEventListener("change", ()=>{ const t=$("mrSel").selectedOptions[0]; if(t) $("mrSummary").innerHTML=`<p class="font-semibold">${t.text}</p>`; });
+
+$("toggleGitForm").addEventListener("click", ()=> $("gitForm").classList.toggle("hidden"));
+$("saveGit").addEventListener("click", async ()=>{
+  try{ await api("/settings/gitlab",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({name:$("glName").value||"公司 GitLab", base_url:$("glUrl").value, token:$("glToken").value})});
+    $("gitForm").classList.add("hidden"); await loadSettings();
+  }catch(e){ showError(e.message); }
+});
+
+function showError(msg){ const b=$("errorBanner"); b.textContent="⚠ "+msg; b.classList.remove("hidden"); }
+function hideError(){ $("errorBanner").classList.add("hidden"); }
+
+$("startBtn").addEventListener("click", async ()=>{
+  hideError(); const pid=$("projectSel").value; const manualPath=$("manualPath").value.trim(); const manualIid=$("manualIid").value;
+  const mrid = $("mrSel").value || manualIid;
+  if(!mrid){ showError("请选择或手工输入 MR。"); return; }
+  const body = (pid&&!$("mrSel").value&&!manualPath) ? {project_id:Number(pid), mr_iid:Number(mrid)}
+            : (manualPath ? {project_path:manualPath, mr_iid:Number(mrid)} : {project_id:Number(pid), mr_iid:Number(mrid)});
+  $("loading").classList.remove("hidden"); $("startBtn").disabled=true;
+  try{
+    const res = await api("/check",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    renderReport(res.report);
+  }catch(e){ showError(e.message); }
+  finally{ $("loading").classList.add("hidden"); $("startBtn").disabled=false; }
+});
+
+function section(title, html){ return `<div class="glass card p-5 fade-in"><h3 class="text-base font-semibold mb-3">${title}</h3>${html}</div>`; }
+
+function renderReport(r){
+  const area=$("reportArea"); area.classList.remove("hidden"); area.innerHTML="";
+  // 1 摘要
+  area.insertAdjacentHTML("beforeend", section(`1. 变更摘要 <span class="text-xs text-[var(--faint)]">模式:${r.meta.analysis_mode} · KB:${r.meta.kb_status}</span>`, `<p class="text-sm">${r.summary||"（无）"}</p>`));
+  // 2 文档检查
+  let docHtml = r.doc_check.length ? `<div class="scroll-x"><table><thead><tr><th>检查项</th><th>结论</th><th>依据</th><th>建议</th><th>证据</th><th>来源</th></tr></thead><tbody>${r.doc_check.map(d=>`<tr><td>${d.item}</td><td>${d.verdict}</td><td>${d.basis||"—"}</td><td>${d.advice||"—"}</td><td>${evBadge(d.evidence_level)}</td><td>${refsStr(d.source_refs)}</td></tr>`).join("")}</tbody></table></div>` : "<p class='text-sm text-[var(--muted)]'>本次未发现明显文档同步需求。</p>";
+  area.insertAdjacentHTML("beforeend", section("2. 配套文档检查", docHtml));
+  // 3 风险
+  const order={high:0,medium:1,low:2}; const risks=[...r.risk].sort((a,b)=>order[a.level]-order[b.level]);
+  let riskHtml = risks.length ? risks.map(x=>`<div class="mb-2"><span class="badge ${x.level==='high'?'ev-A':x.level==='medium'?'ev-C':'ev-N'}">${x.level}</span> ${x.text} ${evBadge(x.evidence_level)} ${refsStr(x.source_refs)}</div>`).join("") : "<p class='text-sm text-[var(--muted)]'>未识别到需要重点关注的风险。</p>";
+  area.insertAdjacentHTML("beforeend", section("3. 变更影响与风险", riskHtml));
+  // 4 项目规范
+  let rulesHtml = r.project_rules.length ? `<div class="scroll-x"><table><thead><tr><th>检查项</th><th>结论</th><th>证据</th><th>来源</th></tr></thead><tbody>${r.project_rules.map(d=>`<tr><td>${d.item}</td><td>${d.verdict}</td><td>${evBadge(d.evidence_level)}</td><td>${refsStr(d.source_refs)}</td></tr>`).join("")}</tbody></table></div>` : "<p class='text-sm text-[var(--muted)]'>未做项目规范初检（无知识库或未检索到相关规范）。</p>";
+  area.insertAdjacentHTML("beforeend", section("4. 项目规范初检", rulesHtml));
+  // 5 历史债务
+  let debtHtml = r.tech_debt.length ? `<div class="scroll-x"><table><thead><tr><th>检查项</th><th>结论</th><th>证据</th><th>来源</th></tr></thead><tbody>${r.tech_debt.map(d=>`<tr><td>${d.item}</td><td>${d.verdict}</td><td>${evBadge(d.evidence_level)}</td><td>${refsStr(d.source_refs)}</td></tr>`).join("")}</tbody></table></div>` : "<p class='text-sm text-[var(--muted)]'>未匹配到历史技术债务 / 风险。</p>";
+  area.insertAdjacentHTML("beforeend", section("5. 历史技术债务 / 风险", debtHtml));
+  // 6 人工自查
+  let chkHtml = r.manual_checklist.length ? "<ul class='space-y-1'>"+r.manual_checklist.map(c=>`<li>☐ ${c}</li>`).join("")+"</ul>" : "<p class='text-sm text-[var(--muted)]'>（无）</p>";
+  area.insertAdjacentHTML("beforeend", section("6. 建议人工自查", chkHtml));
+  // 7 来源
+  let srcHtml = r.kb_sources.length ? r.kb_sources.map(s=>`<div id="src-${s.id}" class="mb-1"><b>[${s.id}]</b> 《${s.title}》（${s.doc_type}，${s.module||"通用"}）</div>`).join("") : "<p class='text-sm text-[var(--muted)]'>本次报告未引用知识库来源。</p>";
+  if(r.meta.kb_status==='failed') srcHtml += "<p class='text-xs text-[var(--faint)] mt-2'>知识库检索暂时不可用，本次已降级为基础自检。</p>";
+  area.insertAdjacentHTML("beforeend", section("7. 知识库来源", srcHtml));
+  area.scrollIntoView({behavior:"smooth"});
+}
+
+loadSettings();
+</script>
+</body>
+</html>

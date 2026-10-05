@@ -1,0 +1,23 @@
+diff --git a/src/refund/RefundController.java b/src/refund/RefundController.java
+new file mode 100644
+--- /dev/null
++++ b/src/refund/RefundController.java
+@@ -0,0 +1,12 +1,12 @@
++package com.order.refund;
++
++@RestController
++@RequestMapping("/api/refund")
++public class RefundController {
++    @GetMapping("/{id}")
++    public RefundVO getRefund(long id) {
++        return service.find(id);
++    }
++}
+diff --git a/src/main/resources/application.yml b/src/main/resources/application.yml
+index 111..222 100644
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -1,3 +1,4 @@
+ server:
+   port: 8080
++  ssl: enabled

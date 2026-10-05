@@ -1,0 +1,22 @@
+services:
+  pr-check:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # 实际部署请通过 .env 文件或环境注入真实凭据
+      APP_ENV: ${APP_ENV:-prod}
+      APP_ENCRYPTION_KEY: ${APP_ENCRYPTION_KEY:-}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/pr_check.db}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      KB_BASE_URL: ${KB_BASE_URL:-}
+      KB_API_KEY: ${KB_API_KEY:-}
+      KB_INDEX: ${KB_INDEX:-}
+    volumes:
+      - pr_check_data:/data
+    restart: unless-stopped
+
+volumes:
+  pr_check_data:
