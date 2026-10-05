@@ -6,6 +6,7 @@ INTERNAL_ERROR，也不会把 429/5xx 当成永久失败。
 """
 from __future__ import annotations
 
+import json
 
 import httpx
 import pytest
@@ -104,6 +105,130 @@ def test_client_error_not_retried(monkeypatch, code):
 
 def test_no_retry_when_max_retries_is_one(monkeypatch):
     assert _run_llm(monkeypatch, [503, 503], 1) == ("LlmUnavailable", 1)
+
+
+# ===== LLM 结构化输出：json_schema 优先 + 不支持时降级 =====
+class _RespWithBody:
+    def __init__(self, status_code: int, body: str = ""):
+        self.status_code = status_code
+        self.text = body
+
+    def json(self):
+        return {"choices": [{"message": {"content": '{"summary":"ok"}'}}]}
+
+
+def _setup_client(monkeypatch, resp_seq, *, schema=None, max_retries: int = 1,
+                  enable_thinking: bool | None = None):
+    """装配一个 httpx.Client 被打桩的 LLMClientImpl，返回 (client, 每次请求的 payload)。"""
+    seq = list(resp_seq)
+    calls: list[dict] = []
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **k):
+            calls.append(k["json"])
+            return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    monkeypatch.setattr(llm_mod.httpx, "Client", _Client)
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: None)
+    client = LLMClientImpl("http://x", "m", "k", timeout=1, max_retries=max_retries,
+                           response_schema=schema, enable_thinking=enable_thinking)
+    return client, calls
+
+
+def _run_llm_schema(monkeypatch, resp_seq, *, schema=None, max_retries: int = 1):
+    """驱动带 Schema 的 LLMClientImpl，返回 (每次请求的 payload, 结果或异常类型名)。"""
+    client, calls = _setup_client(monkeypatch, resp_seq, schema=schema,
+                                  max_retries=max_retries)
+    try:
+        client.complete("s", "u")
+        return calls, "OK"
+    except Exception as exc:  # noqa: BLE001 - 断言异常类型
+        return calls, type(exc).__name__
+
+
+_SAMPLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "risk": {"type": "array", "items": {"$ref": "#/$defs/RiskItem"}},
+    },
+    "$defs": {"RiskItem": {"type": "object", "properties": {"level": {"enum": ["high", "low"]}}}},
+}
+
+
+def test_sends_strict_json_schema_when_schema_configured(monkeypatch):
+    calls, result = _run_llm_schema(monkeypatch, [_RespWithBody(200)], schema=_SAMPLE_SCHEMA)
+    assert result == "OK"
+    fmt = calls[0]["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["name"] == "report_sections"
+    assert fmt["json_schema"]["strict"] is True
+    schema = fmt["json_schema"]["schema"]
+    # $defs / $ref 已内联展开，兼容不支持 $ref 的后端
+    assert "$defs" not in schema
+    assert "$ref" not in json.dumps(schema)
+    assert schema["properties"]["risk"]["items"]["properties"]["level"]["enum"] == ["high", "low"]
+    # strict：字段全部必填、禁止附加属性
+    assert schema["required"] == ["risk", "summary"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["risk"]["items"]["additionalProperties"] is False
+
+
+def test_strict_rejected_falls_back_to_loose_schema(monkeypatch):
+    """strict 被拒时先退到宽松 json_schema（而非直接退回 JSON Mode）。"""
+    rejected = _RespWithBody(400, '{"message":"unsupported response_format: json_schema strict"}')
+    calls, result = _run_llm_schema(
+        monkeypatch, [rejected, _RespWithBody(200)], schema=_SAMPLE_SCHEMA)
+    assert result == "OK"
+    assert [c["response_format"]["json_schema"].get("strict") for c in calls] == [True, False]
+
+
+def test_all_schema_rejected_falls_back_to_json_object(monkeypatch):
+    rejected = _RespWithBody(400, '{"message":"unsupported response_format: json_schema"}')
+    client, calls = _setup_client(
+        monkeypatch, [rejected, rejected, _RespWithBody(200), _RespWithBody(200)],
+        schema=_SAMPLE_SCHEMA)
+    client.complete("s", "u")
+    assert [c["response_format"]["type"] for c in calls] == ["json_schema", "json_schema", "json_object"]
+    # 降级被实例记住：后续请求直接用 json_object，不再重复试探
+    calls.clear()
+    client.complete("s", "u")
+    assert [c["response_format"]["type"] for c in calls] == ["json_object"]
+
+
+def test_no_fallback_for_unrelated_client_error(monkeypatch):
+    """400 但原因与 response_format 无关（如鉴权失败）：不降级，只尝试一次。"""
+    calls, result = _run_llm_schema(
+        monkeypatch, [_RespWithBody(400, '{"message":"Invalid token"}')] * 3,
+        schema=_SAMPLE_SCHEMA)
+    assert result == "LlmUnavailable"
+    assert len(calls) == 1
+
+
+def test_json_object_mode_without_schema(monkeypatch):
+    calls, result = _run_llm_schema(monkeypatch, [_RespWithBody(200)])
+    assert result == "OK"
+    assert calls[0]["response_format"] == {"type": "json_object"}
+
+
+def test_enable_thinking_only_sent_when_configured(monkeypatch):
+    """未配置时不发送 enable_thinking，避免不支持该字段的端点 400。"""
+    client, calls = _setup_client(monkeypatch, [_RespWithBody(200)])
+    client.complete("s", "u")
+    assert "enable_thinking" not in calls[0]
+
+    client, calls = _setup_client(monkeypatch, [_RespWithBody(200)], enable_thinking=False)
+    client.complete("s", "u")
+    assert calls[0]["enable_thinking"] is False
 
 
 # ===== KB 响应结构 =====

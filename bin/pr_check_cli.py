@@ -313,7 +313,13 @@ def _hook_install(args: argparse.Namespace) -> int:
     fail_on = args.fail_on or ["risk:high", "rule:violation"]
     # 写入仓库根目录配置（shell 可 source）
     cfg_path = os.path.join(root, ".pr-check.hook")
+    # 钩子在目标仓库目录下运行，无法推断 CLI 位置：写入绝对路径。
+    # 用正斜杠，避免在 sh 的双引号字符串里被反斜杠转义影响。
+    cli_path = os.path.join(ROOT, "bin", "pr_check_cli.py").replace(os.sep, "/")
+    python_path = sys.executable.replace(os.sep, "/")
     with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(f'PR_CHECK_PYTHON="{python_path}"\n')
+        f.write(f'PR_CHECK_CLI="{cli_path}"\n')
         f.write(f'PR_CHECK_PROJECT="{args.project}"\n')
         f.write(f'PR_CHECK_BASE="{args.base}"\n')
         f.write('PR_CHECK_FAIL_ON="' + " ".join(fail_on) + '"\n')

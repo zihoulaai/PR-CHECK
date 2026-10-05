@@ -52,10 +52,14 @@ def _build_default() -> Container:
     else:
         from app.adapters.llm import LLMClientImpl
         from app.adapters.maas_kb import MaaSVectorKBAdapter
+        from app.domain.schemas import ReportSections
 
         llm = LLMClientImpl(
             base_url=s.llm_base_url, model=s.llm_model, api_key=s.llm_api_key,
             timeout=s.llm_timeout_seconds, max_retries=s.llm_max_retries,
+            # 结构化输出：服务端按 Schema 约束形状；不支持时客户端自动降级 json_object
+            response_schema=ReportSections.model_json_schema(),
+            enable_thinking=s.llm_enable_thinking,
         ) if s.llm_base_url else None
         kb = MaaSVectorKBAdapter(
             base_url=s.kb_base_url, api_key=s.kb_api_key, index=s.kb_index,

@@ -25,11 +25,13 @@ python bin/pr_check_cli.py --help
 
 | 变量 | 说明 | 必填 |
 |---|---|---|
-| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI 兼容端点（如 MaaS / Azure / 本地 vLLM） | 否（未配则自检报告无 LLM 段落，仍返回基础风险） |
+| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI 兼容端点（如 MaaS / 硅基流动 / 本地 vLLM） | 否（未配则自检报告无 LLM 段落，仍返回基础风险） |
 | `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | MaaS Vector KB（项目知识库） | 否 |
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K | 否 |
+
+**结构化输出**：优先 `response_format=json_schema` + `strict=true`（服务端按 `ReportSections` 的 JSON Schema 强制约束输出，Schema 中的 `$defs`/`$ref` 会自动内联展开并补全 `required`）。实测非 strict 时模型会省略 `doc_check` / `risk` 等整段，故默认 strict。降级链 `strict json_schema → json_schema → json_object`：仅当服务端以 400 且响应体指向 `response_format` 时降级一级，降级位置记入客户端实例，后续请求不再重复试探。无论哪种模式，输出仍会经 Pydantic 校验，不合契约即 `LLM_INVALID_OUTPUT`（退出码 5）。
 
 **失败降级契约**：Git 不可用 → 整体失败（不返回半成品）；KB 不可用 → 降级为基础自检（报告无知识段落）；LLM 不可用 → 整体失败（不返回半成品）。错误信封 `{error:{code,message}}` 绝不泄露 Token / 堆栈。
 

@@ -13,6 +13,10 @@ fi
 PROJECT="${PR_CHECK_PROJECT:?请在 .pr-check.hook 设置 PR_CHECK_PROJECT（知识库项目）}"
 BASE="${PR_CHECK_BASE:-main}"
 FAIL_ON="${PR_CHECK_FAIL_ON:-risk:high rule:violation}"
+# CLI 与解释器路径由 `hook install` 写入 .pr-check.hook（绝对路径）；
+# 旧配置没有这两个变量时回退到「仓库内 bin/pr_check_cli.py + PATH 中的 python」。
+PYTHON="${PR_CHECK_PYTHON:-python}"
+CLI="${PR_CHECK_CLI:-$ROOT/bin/pr_check_cli.py}"
 
 # 解析 base 引用：本地分支优先，否则退化为 origin/<base>
 if git rev-parse --quiet --verify "refs/heads/$BASE" >/dev/null 2>&1; then
@@ -30,7 +34,7 @@ for spec in $FAIL_ON; do
 done
 
 set +e
-python "$ROOT/bin/pr_check_cli.py" check --repo "$ROOT" --base "$BASE_REF" \
+"$PYTHON" "$CLI" check --repo "$ROOT" --base "$BASE_REF" \
     --project "$PROJECT" --format json $FAIL_ARGS
 RC=$?
 set -e
