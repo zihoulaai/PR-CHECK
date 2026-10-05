@@ -1,0 +1,41 @@
+#!/bin/sh
+# PR_CHECK pre-push 钩子：推送前对本地分支做自检，命中 --fail-on 闸门则中断推送。
+# 由 `pr-check hook install` 安装到 .git/hooks/pre-push，并读取仓库根目录的 .pr-check.hook 配置。
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+HOOK_CFG="$ROOT/.pr-check.hook"
+if [ -f "$HOOK_CFG" ]; then
+    # shellcheck disable=SC1090
+    . "$HOOK_CFG"
+fi
+
+PROJECT="${PR_CHECK_PROJECT:?请在 .pr-check.hook 设置 PR_CHECK_PROJECT（知识库项目）}"
+BASE="${PR_CHECK_BASE:-main}"
+FAIL_ON="${PR_CHECK_FAIL_ON:-risk:high rule:violation}"
+
+# 解析 base 引用：本地分支优先，否则退化为 origin/<base>
+if git rev-parse --quiet --verify "refs/heads/$BASE" >/dev/null 2>&1; then
+    BASE_REF="$BASE"
+elif git rev-parse --quiet --verify "refs/remotes/origin/$BASE" >/dev/null 2>&1; then
+    BASE_REF="origin/$BASE"
+else
+    BASE_REF="$BASE"
+fi
+
+cd "$ROOT"
+FAIL_ARGS=""
+for spec in $FAIL_ON; do
+    FAIL_ARGS="$FAIL_ARGS --fail-on $spec"
+done
+
+set +e
+python "$ROOT/bin/pr_check_cli.py" check --repo "$ROOT" --base "$BASE_REF" \
+    --project "$PROJECT" --format json $FAIL_ARGS
+RC=$?
+set -e
+
+if [ "$RC" -ne 0 ]; then
+    echo "pre-push 被 PR_CHECK 拦截（退出码 $RC）。如需跳过可用 'git push --no-verify'（不推荐）。" >&2
+    exit 1
+fi

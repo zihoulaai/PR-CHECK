@@ -15,16 +15,6 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
-class GitConnection(SQLModel, table=True):
-    __tablename__ = "git_connections"
-
-    id: str = Field(default="gitlab-default", primary_key=True)
-    name: str
-    base_url: str
-    # 加密后的 Token 字符串（Fernet token 文本），绝不存明文
-    encrypted_token: str = ""
-
-
 class KbDoc(SQLModel, table=True):
     __tablename__ = "kb_docs"
 

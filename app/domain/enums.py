@@ -87,3 +87,22 @@ class DocType(str, Enum):
     API_DOCUMENT = "api_document"
     TECHNICAL_DEBT = "technical_debt"
     HISTORICAL_RISK = "historical_risk"
+
+
+class Platform(str, Enum):
+    """Git 数据源路由键。
+
+    当前仅支持 ``local``：直连本地仓库 ``.git``，无需 Token（读取 diff 与元数据）。
+    """
+
+    LOCAL = "local"  # 直连本地仓库 .git，无需 Token（读 diff + 元数据）
+
+
+class MrState(str, Enum):
+    """MR / PR 状态（兼容旧链路保留；当前仅本地自检不使用）。"""
+
+    OPENED = "opened"
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
+    ALL = "all"

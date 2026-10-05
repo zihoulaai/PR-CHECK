@@ -2,7 +2,7 @@
 """PR_CHECK 命令行工具（独立可运行，无需启动 HTTP 服务）。
 
 面向 AI 工具 / 自动化流程设计：
-- 子命令：check / profile / parse / version / config
+- 子命令：check / kb / hook / version
 - 结构化输出：--format json（默认，便于 AI 解析）或 md（Markdown）
 - 统一错误信封：{"error": {"code", "message"}}，配合退出码便于脚本判断
 - stdin / 管道：--diff - 从标准输入读取 diff 文本
@@ -12,12 +12,8 @@
     # 对一段 diff 跑完整自检（离线 Mock 数据）
     cat pr.diff | python bin/pr_check_cli.py check --diff - --fake
 
-    # 仅看变更画像（确定性、无 LLM/KB，最快）
-    python bin/pr_check_cli.py profile --diff pr.diff --format json
-
-    # 走真实 GitLab MR
-    python bin/pr_check_cli.py check --project team/order --mr-iid 1234 \
-        --gitlab-url https://gitlab.com --gitlab-token $GITLAB_TOKEN
+    # 直连本地仓库（无需 Token）：读取当前分支相对 main 的变更做自检
+    python bin/pr_check_cli.py check --repo . --base main --project team/order
 """
 from __future__ import annotations
 
@@ -31,12 +27,14 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from app.agent.workflow import build_profile_only, run_check, run_check_from_diff
-from app.config import get_settings, is_kb_configured, is_llm_configured
-from app.adapters.base import GitCredential
+from pathlib import Path
+
+from app.adapters.base import GitCredential, KbDocInput
+from app.agent.workflow import run_check, run_check_from_diff
+from app.container import get_container
+from app.domain.enums import DocType, Platform
 from app.domain.schemas import MRRef, ProjectRef
-from app.errors import AppError, ValidationError
-from app.parser.diff_parser import parse_diff
+from app.errors import AppError, GitAuthFailed, NotConfiguredError, ValidationError
 from app.report.markdown import render_markdown
 
 VERSION = "1.0.0"
@@ -45,19 +43,21 @@ VERSION = "1.0.0"
 EXIT_OK = 0
 EXIT_INVALID = 2
 EXIT_NOT_CONFIGURED = 3
-EXIT_GITLAB = 4
+EXIT_GIT = 4
 EXIT_LLM = 5
 EXIT_KB = 6
+EXIT_GATE = 7
 EXIT_INTERNAL = 99
 
 _CODE_TO_EXIT = {
     "INVALID_REQUEST": EXIT_INVALID,
     "NOT_CONFIGURED": EXIT_NOT_CONFIGURED,
-    "GITLAB_UNAVAILABLE": EXIT_GITLAB,
-    "GITLAB_AUTH_FAILED": EXIT_GITLAB,
-    "GITLAB_FORBIDDEN": EXIT_GITLAB,
-    "PROJECT_NOT_FOUND": EXIT_GITLAB,
-    "MR_NOT_FOUND": EXIT_GITLAB,
+    # 本地 Git 错误统一映射到退出码 4
+    "GIT_UNAVAILABLE": EXIT_GIT,
+    "GIT_AUTH_FAILED": EXIT_GIT,
+    "GIT_FORBIDDEN": EXIT_GIT,
+    "PROJECT_NOT_FOUND": EXIT_GIT,
+    "MR_NOT_FOUND": EXIT_GIT,
     "LLM_UNAVAILABLE": EXIT_LLM,
     "LLM_TIMEOUT": EXIT_LLM,
     "LLM_RATE_LIMITED": EXIT_LLM,
@@ -124,26 +124,23 @@ def _emit_error(code: str, message: str, stream: str) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     _maybe_enable_fake(args.fake)
 
-    use_gitlab = args.mr_iid is not None or (args.project and not _diff_given(args))
-    if use_gitlab:
-        if not args.fake and not (args.gitlab_url and args.gitlab_token):
-            raise ValidationError(
-                "GitLab 路径需提供 --gitlab-url 与 --gitlab-token（或使用 --fake 离线联调）。"
-            )
-        cred = GitCredential(base_url=args.gitlab_url or "", token=args.gitlab_token or "")
-        from app.container import get_container
+    effective_project = args.project
 
-        container = get_container()
-        if container.git is None:
-            raise AppError("GitLab 适配器未配置。", code="NOT_CONFIGURED")
-        project = ProjectRef(path=args.project or None)
-        mr_ref = MRRef(project=project, iid=args.mr_iid)
+    if getattr(args, "repo", None):
+        # 本地仓库直连：读 .git 取 diff + 元数据，无需 Token
+        cred = GitCredential(base_url=args.repo, token="", platform=Platform.LOCAL.value)
+        project = ProjectRef(path=effective_project or args.repo)
+        mr_ref = MRRef(
+            project=project, iid=0,
+            base_branch=getattr(args, "base", None) or "main",
+            source_ref=getattr(args, "source", None) or "HEAD",
+        )
         report = run_check(cred, mr_ref)
     else:
         diff_text = _read_diff(args)
         report = run_check_from_diff(
             diff_text,
-            project=args.project or "",
+            project=effective_project or "",
             title=args.title or "",
             description=args.description or "",
             source_branch=args.source_branch or "",
@@ -151,40 +148,30 @@ def cmd_check(args: argparse.Namespace) -> int:
             author=args.author or "",
         )
 
+    # 拦截闸门：命中 --fail-on 策略时返回 GATE_FAILED（仍输出完整报告便于定位）
+    if getattr(args, "fail_on", None):
+        from app.agent.gate import evaluate_gate, parse_gate_rules
+        try:
+            specs = parse_gate_rules(args.fail_on)
+        except ValueError as exc:
+            raise ValidationError(str(exc))
+        violations = evaluate_gate(report, specs)
+    else:
+        violations = []
+
     if args.format == "md":
         _emit((None, render_markdown(report)), args)
     else:
         _emit(report.model_dump(mode="json"), args)
+
+    if violations:
+        sys.stderr.write("GATE FAILED: " + "; ".join(violations) + "\n")
+        return EXIT_GATE
     return EXIT_OK
 
 
 def _diff_given(args: argparse.Namespace) -> bool:
     return bool(getattr(args, "diff", None)) or bool(getattr(args, "input", None))
-
-
-def cmd_profile(args: argparse.Namespace) -> int:
-    diff_text = _read_diff(args)
-    profile = build_profile_only(diff_text, project=args.project or "", title=args.title or "")
-    _emit(profile.model_dump(mode="json"), args)
-    return EXIT_OK
-
-
-def cmd_parse(args: argparse.Namespace) -> int:
-    diff_text = _read_diff(args)
-    parsed = parse_diff(diff_text)
-    files = [
-        {
-            "path": p.path,
-            "status": p.status,
-            "additions": p.additions,
-            "deletions": p.deletions,
-            "language": p.language,
-            "module": p.module,
-        }
-        for p in parsed
-    ]
-    _emit({"files": files, "file_count": len(files)}, args)
-    return EXIT_OK
 
 
 def cmd_version(_args: argparse.Namespace) -> int:
@@ -194,33 +181,6 @@ def cmd_version(_args: argparse.Namespace) -> int:
         "components": ["diff-parser", "change-profile", "agent", "report"],
     }
     print(json.dumps(info, ensure_ascii=False, indent=2))
-    return EXIT_OK
-
-
-def cmd_config(args: argparse.Namespace) -> int:
-    s = get_settings()
-    data = s.model_dump()
-    # 脱敏：密钥类字段不输出明文
-    for secret_key in ("app_encryption_key", "llm_api_key", "kb_api_key"):
-        if data.get(secret_key):
-            data[secret_key] = "<set>"
-
-    if args.check:
-        result = {
-            "llm_configured": is_llm_configured(s),
-            "kb_configured": is_kb_configured(s),
-            "fake_mode": os.getenv("PR_CHECK_USE_FAKE") == "1",
-            "thresholds": {
-                "small_max_files": s.small_max_files,
-                "small_max_lines": s.small_max_lines,
-                "medium_max_files": s.medium_max_files,
-                "medium_max_lines": s.medium_max_lines,
-            },
-            "kb_top_k": s.kb_top_k,
-        }
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
     return EXIT_OK
 
 
@@ -240,43 +200,154 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # check
-    p_check = sub.add_parser("check", help="对 diff 或 GitLab MR 执行完整 PR 自检。")
+    p_check = sub.add_parser("check", help="对 diff 或本地仓库执行完整 PR 自检。")
     p_check.add_argument("--diff", metavar="FILE", help="diff 文件；- 表示从管道读取。")
-    p_check.add_argument("--project", help="项目路径（diff 模式用于 KB/标题；GitLab 模式必填）。")
-    p_check.add_argument("--mr-iid", type=int, help="MR 编号（走 GitLab 路径）。")
+    p_check.add_argument("--project", help="项目路径（用于 KB 检索范围与报告标题；可选）。")
     p_check.add_argument("--title", help="PR 标题（diff 模式）。")
     p_check.add_argument("--description", help="PR 描述（diff 模式）。")
     p_check.add_argument("--source-branch", help="源分支（diff 模式）。")
     p_check.add_argument("--target-branch", help="目标分支（diff 模式）。")
     p_check.add_argument("--author", help="作者（diff 模式）。")
-    p_check.add_argument("--gitlab-url", help="GitLab 基址（真实路径）。")
-    p_check.add_argument("--gitlab-token", help="GitLab Token（真实路径）。")
+    p_check.add_argument("--repo", help="本地仓库路径（直连 .git，无需 Token）。")
+    p_check.add_argument("--base", help="本地模式目标分支（默认 main），用于计算 diff。")
+    p_check.add_argument("--source", help="本地模式源引用（默认 HEAD，即当前分支提交）。")
     p_check.add_argument("--fake", action="store_true", help="使用离线 Fake 适配器。")
     p_check.add_argument("--format", choices=["json", "md"], default="json")
     p_check.add_argument("--pretty", action="store_true", help="JSON 缩进美化。")
-
-    # profile
-    p_profile = sub.add_parser("profile", help="仅解析 diff 输出变更画像（无 LLM/KB）。")
-    p_profile.add_argument("--diff", metavar="FILE", required=True, help="diff 文件；- 表示从管道读取。")
-    p_profile.add_argument("--project", help="项目路径。")
-    p_profile.add_argument("--title", help="PR 标题。")
-    p_profile.add_argument("--format", choices=["json"], default="json")
-    p_profile.add_argument("--pretty", action="store_true")
-
-    # parse
-    p_parse = sub.add_parser("parse", help="输出底层 diff 解析结果（文件级）。")
-    p_parse.add_argument("--diff", metavar="FILE", required=True, help="diff 文件；- 表示从管道读取。")
-    p_parse.add_argument("--format", choices=["json"], default="json")
-    p_parse.add_argument("--pretty", action="store_true")
+    p_check.add_argument(
+        "--fail-on", action="append", metavar="SPEC",
+        help="拦截闸门（可重复）：命中则返回 GATE_FAILED，git hook 据此中断推送。"
+             "格式 section:value，如 risk:high / rule:violation / doc:confirm / doc:update "
+             "/ debt:direct_match / debt:related。",
+    )
 
     # version
     sub.add_parser("version", help="输出版本信息。")
 
-    # config
-    p_config = sub.add_parser("config", help="打印生效配置（脱敏）。")
-    p_config.add_argument("--check", action="store_true", help="仅输出配置就绪校验。")
+    # kb（知识库文档管理，替代原 Web /kb/docs）
+    p_kb = sub.add_parser("kb", help="管理知识库文档。")
+    kb_sub = p_kb.add_subparsers(dest="kb_action", required=True)
+    p_kb_up = kb_sub.add_parser("upload", help="上传知识文档。")
+    p_kb_up.add_argument("--file", required=True, help="文档文件")
+    p_kb_up.add_argument("--project", required=True, help="项目（知识隔离强制过滤）")
+    p_kb_up.add_argument("--doc-type", required=True, choices=[d.value for d in DocType])
+    p_kb_up.add_argument("--module", default="")
+    p_kb_up.add_argument("--title", default="")
+    p_kb_list = kb_sub.add_parser("list", help="列出已上传文档。")
+    p_kb_list.add_argument("--project")
+    p_kb_list.add_argument("--module")
+    p_kb_list.add_argument("--doc-type")
+
+    # hook（git 钩子安装/卸载，配合 --fail-on 闸门实现推送拦截）
+    p_hook = sub.add_parser("hook", help="管理 git 钩子（pre-push 拦截）。")
+    hook_sub = p_hook.add_subparsers(dest="hook_action", required=True)
+    p_hook_install = hook_sub.add_parser("install", help="安装 pre-push 钩子到 .git/hooks。")
+    p_hook_install.add_argument("--project", required=True, help="知识库项目（KB 范围）。")
+    p_hook_install.add_argument("--base", default="main", help="本地模式目标分支（默认 main）。")
+    p_hook_install.add_argument("--fail-on", action="append", metavar="SPEC", default=None,
+                                help="拦截闸门（可重复）；省略默认 risk:high rule:violation。"
+                                     "如 risk:high / rule:violation / doc:confirm。")
+    p_hook_install.add_argument("--hook-name", default="pre-push", help="钩子名（默认 pre-push）。")
+    p_hook_un = hook_sub.add_parser("uninstall", help="移除已安装的 git 钩子。")
+    p_hook_un.add_argument("--hook-name", default="pre-push", help="钩子名（默认 pre-push）。")
 
     return parser
+
+
+def cmd_kb(args: argparse.Namespace) -> int:
+    action = getattr(args, "kb_action", None)
+    kb = get_container().kb
+    if kb is None:
+        raise NotConfiguredError("知识库未配置（请设置 KB_BASE_URL / KB_API_KEY / KB_INDEX）。")
+    if action == "upload":
+        try:
+            DocType(args.doc_type)
+        except ValueError:
+            raise ValidationError(f"不支持的 doc_type：{args.doc_type}")
+        path = Path(args.file)
+        if not path.exists():
+            raise FileNotFoundError(args.file)
+        content = path.read_text(encoding="utf-8")
+        doc_id = kb.upload(KbDocInput(
+            project=args.project, module=args.module, doc_type=args.doc_type,
+            title=args.title or path.name, content=content,
+        ))
+        # 元数据落 SQLite（与 KB 向量库分离存储，供 list / 检索过滤；与旧 Web /kb/docs 一致）
+        from app.domain.models import KbDoc
+        from app.storage.repo import insert_kb_doc
+        insert_kb_doc(KbDoc(
+            id=doc_id, project=args.project, module=args.module,
+            doc_type=args.doc_type, title=args.title or path.name,
+            status="active", snippet=content[:500],
+        ))
+        _emit({"id": doc_id, "project": args.project, "doc_type": args.doc_type,
+               "title": args.title or path.name}, args)
+        return EXIT_OK
+    # list
+    from app.storage.repo import list_kb_docs
+    docs = list_kb_docs(project=args.project, module=args.module, doc_type=args.doc_type)
+    _emit([{"id": d.id, "project": d.project, "module": d.module,
+            "doc_type": d.doc_type, "title": d.title} for d in docs], args)
+    return EXIT_OK
+
+
+# ===== hook 子命令（git 钩子安装/卸载） =====
+
+def _git_toplevel() -> str:
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise ValidationError(f"当前目录不是 git 仓库，无法安装钩子：{exc}")
+    return out.stdout.strip()
+
+
+def _hook_install(args: argparse.Namespace) -> int:
+    import shutil
+
+    root = _git_toplevel()
+    hook_name = args.hook_name
+    fail_on = args.fail_on or ["risk:high", "rule:violation"]
+    # 写入仓库根目录配置（shell 可 source）
+    cfg_path = os.path.join(root, ".pr-check.hook")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(f'PR_CHECK_PROJECT="{args.project}"\n')
+        f.write(f'PR_CHECK_BASE="{args.base}"\n')
+        f.write('PR_CHECK_FAIL_ON="' + " ".join(fail_on) + '"\n')
+    # 复制模板钩子
+    template = os.path.join(ROOT, "hooks", hook_name)
+    if not os.path.isfile(template):
+        raise ValidationError(f"未找到钩子模板：{template}")
+    dest = os.path.join(root, ".git", "hooks", hook_name)
+    shutil.copyfile(template, dest)
+    os.chmod(dest, 0o755)
+    print(f"已安装 {hook_name} 钩子到 {dest}")
+    print(f"配置写入 {cfg_path}（project={args.project}, base={args.base}, "
+          f"fail-on={' '.join(fail_on)}）")
+    return EXIT_OK
+
+
+def _hook_uninstall(args: argparse.Namespace) -> int:
+    root = _git_toplevel()
+    dest = os.path.join(root, ".git", "hooks", args.hook_name)
+    if os.path.isfile(dest):
+        os.remove(dest)
+        print(f"已移除钩子 {dest}")
+    else:
+        print(f"未找到钩子 {dest}（无需移除）")
+    return EXIT_OK
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    action = getattr(args, "hook_action", None)
+    if action == "install":
+        return _hook_install(args)
+    if action == "uninstall":
+        return _hook_uninstall(args)
+    raise ValidationError(f"未知 hook 动作：{action}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -286,10 +357,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         handler = {
             "check": cmd_check,
-            "profile": cmd_profile,
-            "parse": cmd_parse,
             "version": cmd_version,
-            "config": cmd_config,
+            "kb": cmd_kb,
+            "hook": cmd_hook,
         }[args.command]
         return handler(args)
     except AppError as exc:

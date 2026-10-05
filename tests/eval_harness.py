@@ -22,9 +22,6 @@ if _PROJECT_ROOT not in sys.path:
 
 # 确保离线 fake 环境
 os.environ.setdefault("PR_CHECK_USE_FAKE", "1")
-if "APP_ENCRYPTION_KEY" not in os.environ:
-    from cryptography.fernet import Fernet
-    os.environ["APP_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
 from app.adapters.base import GitCredential  # noqa: E402
 from app.adapters.fakes import FakeGitLab, FakeKB, FakeLLM  # noqa: E402
@@ -38,10 +35,8 @@ FORBIDDEN_INJECTION = ["完美", "不存在Bug", "不存在 Bug", "绝对安全"
 
 
 def _setup_fakes(preload_debt: bool = False):
-    from app.security.secrets import reset_secret_store  # noqa: E402
     from app.storage.sqlite import reset_engine  # noqa: E402
     reset_engine()
-    reset_secret_store()
     c = get_container()
     c.llm = FakeLLM()
     kb = FakeKB()

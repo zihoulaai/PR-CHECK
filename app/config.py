@@ -1,9 +1,7 @@
 """配置中心：环境变量分层 + 可配置阈值 / Top-K。
 
-依据 docs/IMPLEMENTATION-READY-v1.md C2：
-- 环境变量：APP_ENV / APP_ENCRYPTION_KEY / DATABASE_URL / LLM_* / KB_*
-- GitLab 连接（含加密 Token）存 SQLite，不在此处。
-- 三档 PR 阈值与 KB Top-K 可配置，便于调参（D7/D8）。
+环境变量：APP_ENV / DATABASE_URL / LLM_* / KB_*。
+三档 PR 阈值与 KB Top-K 可配置，便于调参。
 """
 from __future__ import annotations
 
@@ -20,7 +18,6 @@ class Settings(BaseSettings):
     )
 
     app_env: str = "dev"
-    app_encryption_key: str | None = None
     database_url: str = "sqlite:///./pr_check.db"
 
     # LLM

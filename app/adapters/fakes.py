@@ -17,6 +17,7 @@ from app.adapters.base import (
     MRItem,
     ProjectItem,
 )
+from app.domain.enums import Platform
 from app.domain.schemas import KBHit, KBQuery, MRRef, PRMetadata, ProjectRef
 
 DEFAULT_SAMPLE_DIFF = """diff --git a/src/refund/RefundController.java b/src/refund/RefundController.java
@@ -45,9 +46,16 @@ index 111..222 100644
 """
 
 
-class FakeGitLab:
-    def __init__(self, sample_diff: str = DEFAULT_SAMPLE_DIFF, project_id: int = 123,
+class FakeGitPlatform:
+    """离线 Mock Git 适配器。
+
+    行为与旧 FakeGitLab 一致，提供确定性样例项目 / MR / Diff，便于解析与画像测试。
+    """
+
+    def __init__(self, platform: "Platform | str" = Platform.LOCAL,
+                 sample_diff: str = DEFAULT_SAMPLE_DIFF, project_id: int = 123,
                  project_path: str = "team/order-service"):
+        self.platform = Platform(platform)
         self.sample_diff = sample_diff
         self.project_id = project_id
         self.project_path = project_path
@@ -77,6 +85,10 @@ class FakeGitLab:
 
     def get_diff(self, cred: GitCredential, ref: MRRef) -> str:
         return self.sample_diff
+
+
+# 向后兼容别名（旧单测 / eval_harness 仍 import FakeGitLab）
+FakeGitLab = FakeGitPlatform
 
 
 class FakeLLM:

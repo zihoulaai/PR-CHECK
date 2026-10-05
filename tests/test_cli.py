@@ -1,6 +1,6 @@
 """CLI 测试：函数级（capsys）+ 子进程级（错误信封 / 退出码 / 管道）。
 
-覆盖：check（fake+diff 文件 JSON、md 7 段）、profile、parse、version、
+覆盖：check（fake+diff 文件 JSON、md 7 段）、version、
 错误码 INVALID_REQUEST（缺 diff）、stdin 管道。
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 
 import pytest
 
-from bin.pr_check_cli import cmd_check, cmd_parse, cmd_profile, cmd_version
+from bin.pr_check_cli import cmd_check, cmd_version
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(REPO_ROOT, "bin", "pr_check_cli.py")
@@ -23,8 +23,8 @@ FIXTURE = os.path.join(REPO_ROOT, "tests", "fixtures", "sample_refund.diff")
 def _ns(**over):
     base = dict(
         diff=FIXTURE, input=None, project="", title="", description="",
-        source_branch="", target_branch="", author="", mr_iid=None,
-        gitlab_url="", gitlab_token="", fake=True, format="json", pretty=False,
+        source_branch="", target_branch="", author="",
+        fake=True, format="json", pretty=False,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -44,22 +44,6 @@ def test_cli_check_md(capsys):
     out = capsys.readouterr().out
     assert "## 1. 变更摘要" in out
     assert "## 7. 知识库来源" in out
-
-
-def test_cli_profile_json(capsys):
-    rc = cmd_profile(_ns())
-    assert rc == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["changed_files"] == 2
-    assert "change_types" in out and "files" in out
-
-
-def test_cli_parse_json(capsys):
-    rc = cmd_parse(_ns())
-    assert rc == 0
-    out = json.loads(capsys.readouterr().out)
-    assert out["file_count"] == 2
-    assert out["files"][0]["language"] == "java"
 
 
 def test_cli_version(capsys):

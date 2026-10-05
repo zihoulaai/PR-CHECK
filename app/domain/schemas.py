@@ -38,6 +38,17 @@ class ProjectRef(BaseModel):
 class MRRef(BaseModel):
     project: ProjectRef
     iid: int
+    # 本地仓库直连（platform=local）时用于计算 diff / 合成元数据；远程平台忽略
+    base_branch: str | None = None
+    source_ref: str | None = None
+
+    @property
+    def pr_number(self) -> int:
+        """平台中立的 MR/PR 编号（GitLab iid == GitHub pull_number）。
+
+        适配器统一读取此属性，避免业务代码感知 iid / pull_number 差异。
+        """
+        return self.iid
 
 
 # ===== PR 元数据 =====
@@ -192,41 +203,3 @@ class CheckReport(BaseModel):
     tech_debt: list[TechDebtItem] = Field(default_factory=list)
     manual_checklist: list[str] = Field(default_factory=list)
     kb_sources: list[KbSource] = Field(default_factory=list)
-
-
-# ===== 请求 / 响应 =====
-class CheckRequest(BaseModel):
-    # 方式 A：浏览选择
-    connection_id: Optional[str] = None
-    project_id: Optional[int] = None
-    project_path: Optional[str] = None
-    mr_iid: int
-
-    @model_validator(mode="after")
-    def _need_project(self) -> "CheckRequest":
-        if self.project_id is None and not self.project_path:
-            raise ValueError("需要 project_id 或 project_path 其中之一")
-        return self
-
-
-class CheckResponse(BaseModel):
-    report: CheckReport
-    rendered_markdown: str = ""
-
-
-class SettingsGitLabIn(BaseModel):
-    name: str
-    base_url: str
-    token: str
-
-
-class SettingsGitLabOut(BaseModel):
-    id: str
-    name: str
-    base_url: str
-
-
-class SettingsOut(BaseModel):
-    gitlab: dict
-    llm: dict
-    kb: dict

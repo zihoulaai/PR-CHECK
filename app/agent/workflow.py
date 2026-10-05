@@ -13,7 +13,7 @@ from app.adapters.base import GitCredential
 from app.agent.evidence import sanitize_report
 from app.agent.kb_query import build_kb_query
 from app.agent.prompt import build_system_prompt, build_user_prompt
-from app.container import get_container
+from app.container import get_container, select_git_adapter
 from app.domain.enums import AnalysisMode, DocCheckVerdict, EvidenceLevel, KbStatus, RiskLevel
 from app.domain.schemas import (
     CheckReport, DocCheckItem, KBHit, KbSource, MRRef, PRMetadata, RiskItem,
@@ -28,12 +28,12 @@ logger = logging.getLogger("pr_check")
 
 def run_check(cred: GitCredential, mr_ref: MRRef) -> CheckReport:
     container = get_container()
-    if container.git is None:
-        raise NotConfiguredError("GitLab 连接未配置。")
+    # 选择本地 Git 适配器（直连 .git，无需 Token）
+    git = select_git_adapter(cred.platform)
 
     # 1) Git 获取（失败即终止，不进入 Agent）
-    pr: PRMetadata = container.git.get_mr(cred, mr_ref)
-    diff_text: str = container.git.get_diff(cred, mr_ref)
+    pr: PRMetadata = git.get_mr(cred, mr_ref)
+    diff_text: str = git.get_diff(cred, mr_ref)
 
     # 2) Diff 解析 + 变更画像
     parsed = parse_diff(diff_text)
@@ -143,18 +143,6 @@ def run_check_from_diff(
         report = sanitize_report(report)
 
     return report
-
-
-def build_profile_only(
-    diff_text: str,
-    *,
-    project: str = "",
-    title: str = "",
-) -> ChangeProfile:
-    """仅解析 diff 生成变更画像（确定性，无 LLM/KB），供 profile 子命令。"""
-    pr = PRMetadata(project=project, repository=project, title=title)
-    parsed = parse_diff(diff_text)
-    return build_change_profile(pr, parsed)
 
 
 def _assemble(pr, profile, sections, kb_hits, mode, kb_status) -> CheckReport:

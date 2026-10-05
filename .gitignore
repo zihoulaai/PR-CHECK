@@ -10,6 +10,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# Build artifacts
+dist/
+build/
+
 # Runtime data
 *.db
 *.sqlite

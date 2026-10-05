@@ -1,8 +1,7 @@
-"""SQLite 存储：GitLab 连接 metadata（Token 加密）与 KB 文档元数据。
+"""SQLite 存储：KB 文档元数据。
 
-依据 C2 / D14 / D15：
-- 仅保存需要通过 UI 修改的配置与 KB 文档 metadata；
-- GitLab Token 加密存储，绝不明文落库；
+依据 C2 / D15：
+- 仅保存 KB 文档 metadata；
 - 原始 Diff / 完整 PR 描述 / 报告不落库（ephemeral）。
 """
 from __future__ import annotations
@@ -10,7 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from sqlmodel import Session, create_engine, select
+from sqlmodel import Session, create_engine
 
 from app.config import get_settings
 

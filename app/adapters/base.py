@@ -15,10 +15,16 @@ from app.domain.schemas import KBHit, KBQuery, MRRef, PRMetadata, ProjectRef
 
 @dataclass
 class GitCredential:
-    """解密后的 GitLab 连接凭据（仅在调用 Adapter 的瞬间存在，不落库/不进 LLM）。"""
+    """供 Git 适配器使用的凭据载体（仅在调用 Adapter 的瞬间存在，不落库/不进 LLM）。
+
+    - base_url：本地模式为仓库路径（直连 .git）；远程模式曾为 API 基址（本项目已移除远程路径）。
+    - token：本地模式恒为空；绝不进日志 / LLM / 报告。
+    - platform：适配器路由键（当前仅 ``local``）。
+    """
 
     base_url: str
-    token: str
+    token: str = ""
+    platform: str = "local"  # local（见 enums.Platform）
 
 
 @dataclass

@@ -1,14 +1,13 @@
-"""统一错误类型与 HTTP 错误映射。
+"""统一错误类型。
 
-所有接口返回统一格式（C1）：
+所有对外错误统一格式（C1）：
     {"error": {"code": "...", "message": "..."}}
 内部异常 / 堆栈 / Token 等不得暴露（M5 / S3）。
+
+CLI 通过 AppError.to_body() 产出同样的信封，配合退出码返回（见 bin/pr_check_cli.py）。
 """
 from __future__ import annotations
 
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 import logging
 
 logger = logging.getLogger("pr_check")
@@ -29,34 +28,36 @@ class AppError(Exception):
         return {"error": {"code": self.code, "message": str(self.args[0] or self.friendly_message)}}
 
 
-# ===== GitLab（M5） =====
-class GitLabError(AppError):
+# ===== Git（本地自检） =====
+class GitPlatformError(AppError):
+    """Git 错误基类（平台中立）；status 502；不泄露 Token / 堆栈。"""
+
     status_code = 502
 
 
-class GitLabUnavailable(GitLabError):
-    code = "GITLAB_UNAVAILABLE"
-    friendly_message = "无法获取 PR 变更，请检查 GitLab 连接配置及项目权限。"
+class GitUnavailable(GitPlatformError):
+    code = "GIT_UNAVAILABLE"
+    friendly_message = "无法获取 PR 变更，请检查本地 Git 仓库与分支。"
 
 
-class GitLabAuthFailed(GitLabError):
-    code = "GITLAB_AUTH_FAILED"
-    friendly_message = "GitLab 鉴权失败，请检查连接配置中的 Token。"
+class GitAuthFailed(GitPlatformError):
+    code = "GIT_AUTH_FAILED"
+    friendly_message = "Git 鉴权失败，请检查本地仓库权限。"
 
 
-class GitLabForbidden(GitLabError):
-    code = "GITLAB_FORBIDDEN"
-    friendly_message = "无权访问该项目或 MR，请确认 Token 权限与项目可见性。"
+class GitForbidden(GitPlatformError):
+    code = "GIT_FORBIDDEN"
+    friendly_message = "无权访问该仓库，请确认仓库可见性。"
 
 
-class ProjectNotFound(GitLabError):
+class ProjectNotFound(GitPlatformError):
     code = "PROJECT_NOT_FOUND"
-    friendly_message = "未找到对应的项目，请确认项目路径或连接配置。"
+    friendly_message = "未找到对应的项目，请确认项目路径。"
 
 
-class MrNotFound(GitLabError):
+class MrNotFound(GitPlatformError):
     code = "MR_NOT_FOUND"
-    friendly_message = "未找到对应的 MR，请确认 MR 编号或分支状态。"
+    friendly_message = "未找到对应的 MR，请确认分支状态。"
 
 
 # ===== KB =====
@@ -107,26 +108,3 @@ class SecurityError(AppError):
     code = "SECURITY_ERROR"
     status_code = 500
     friendly_message = "安全相关操作失败，请检查服务端配置。"
-
-
-def register_exception_handlers(app: FastAPI) -> None:
-    @app.exception_handler(AppError)
-    async def _handle_app_error(_: Request, exc: AppError) -> JSONResponse:
-        # 仅记录安全字段，不记录内部细节 / Token / 堆栈
-        logger.error("app_error code=%s", exc.code)
-        return JSONResponse(status_code=exc.status_code, content=exc.to_body())
-
-    @app.exception_handler(RequestValidationError)
-    async def _handle_validation(_: Request, exc: RequestValidationError) -> JSONResponse:
-        return JSONResponse(
-            status_code=422,
-            content={"error": {"code": "INVALID_REQUEST", "message": "请求参数校验失败。"}},
-        )
-
-    @app.exception_handler(Exception)
-    async def _handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
-        logger.error("unexpected_error type=%s", type(exc).__name__)
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"code": "INTERNAL_ERROR", "message": "服务内部错误，请稍后重试。"}},
-        )
