@@ -34,7 +34,7 @@ from app.agent.workflow import run_check, run_check_from_diff
 from app.container import get_container
 from app.domain.enums import DocType, Platform
 from app.domain.schemas import MRRef, ProjectRef
-from app.errors import AppError, GitAuthFailed, NotConfiguredError, ValidationError
+from app.errors import AppError, NotConfiguredError, ValidationError
 from app.report.markdown import render_markdown
 
 VERSION = "1.0.0"

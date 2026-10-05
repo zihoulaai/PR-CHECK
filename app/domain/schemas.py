@@ -7,13 +7,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.enums import (
     AnalysisMode,
     ChangeType,
     DocCheckVerdict,
-    DocType,
     EvidenceLevel,
     HighImpactFeature,
     KbStatus,
@@ -96,8 +95,6 @@ class ChangeProfile(BaseModel):
     config_changes: list[str] = Field(default_factory=list)
     dependency_changes: list[str] = Field(default_factory=list)
     logging_changes: list[str] = Field(default_factory=list)
-    comment_changes: list[str] = Field(default_factory=list)
-    test_changes: list[str] = Field(default_factory=list)
     high_impact_features: list[HighImpactFeature] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     analysis_mode: AnalysisMode = AnalysisMode.FULL
@@ -116,6 +113,7 @@ class KBQuery(BaseModel):
     api_changes: list[str] = Field(default_factory=list)
     data_changes: list[str] = Field(default_factory=list)
     config_changes: list[str] = Field(default_factory=list)
+    dependency_changes: list[str] = Field(default_factory=list)
     logging_changes: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     focus: list[str] = Field(default_factory=list)
@@ -130,6 +128,7 @@ class KBQuery(BaseModel):
         self.api_changes = self.api_changes[:10]
         self.data_changes = self.data_changes[:10]
         self.config_changes = self.config_changes[:10]
+        self.dependency_changes = self.dependency_changes[:10]
         self.logging_changes = self.logging_changes[:10]
         self.pr_title = self.pr_title[:200]
         self.pr_description = self.pr_description[:1000]
@@ -203,3 +202,22 @@ class CheckReport(BaseModel):
     tech_debt: list[TechDebtItem] = Field(default_factory=list)
     manual_checklist: list[str] = Field(default_factory=list)
     kb_sources: list[KbSource] = Field(default_factory=list)
+
+
+class ReportSections(BaseModel):
+    """LLM 原始分段输出契约（kb_sources 与 meta 由系统填充，LLM 无需输出）。
+
+    与 CheckReport 的区别：这是 LLM 唯一被允许输出的形状。校验失败即
+    LLM_INVALID_OUTPUT（退出码 5），不返回半成品报告。
+
+    extra="ignore"：容忍 LLM 多吐出的未知字段，只强校验已知字段的存在性与取值。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    summary: str = ""
+    doc_check: list[DocCheckItem] = Field(default_factory=list)
+    risk: list[RiskItem] = Field(default_factory=list)
+    project_rules: list[RuleItem] = Field(default_factory=list)
+    tech_debt: list[TechDebtItem] = Field(default_factory=list)
+    manual_checklist: list[str] = Field(default_factory=list)

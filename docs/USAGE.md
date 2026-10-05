@@ -140,6 +140,12 @@ python bin/pr_check_cli.py kb list --doc-type api_document
 | `full` | ≤20 文件 且 ≤800 行 | 完整 Diff 送 LLM 分析 |
 | `focused` | 21–80 文件 或 801–3000 行 | 仅保留高影响文件 Diff 送 LLM |
 | `summary_only` | >80 文件 或 >3000 行 | 仅摘要 + 基础风险 + 人工清单，不进完整 LLM |
+| `summary_only` | 0 文件 或 0 增删行 | 空 Diff、纯二进制/权限变更、纯重命名：无内容可分析，不调 LLM |
+
+> `focused` 模式下若变更不含任何高影响特征，则保留全部 Diff（避免空 context）。
+> 「高影响特征」覆盖 `HighImpactFeature` 全部取值（公共 API、数据库、配置、权限、事务、缓存、序列化、并发、外部依赖、日志）。
+
+**模块推导**：跳过 `src` / `lib` / `app` / `main` / `java` / `resources` / `test` 等纯布局目录，取第一个有业务语义的目录段（`src/main/java/com/x/Foo.java` → `com`，`src/refund/RefundController.java` → `refund`）。`core` / `common` / `server` 等视为真实模块名，不跳过。整条路径都是布局段时回退到第一级目录。
 
 ---
 
@@ -157,7 +163,7 @@ python bin/pr_check_cli.py kb list --doc-type api_document
 | 6 人工清单 | `manual_checklist[]` | 需人工确认的事项（字符串列表） |
 | 7 知识来源 | `kb_sources[]` | 本次引用的知识文档，`{id, title, doc_type, project, module}` |
 
-**Evidence 等级强制规则**：`A`/`B` 必须 `source_refs` 非空（可溯源）；`C` 仅作弱化表述；`N` 必须明确「无法判断」。无知识命中时 `project_rules` / `tech_debt` 为空数组（对应「无知识不强判」）。
+**Evidence 等级强制规则**：`A`/`B` 必须 `source_refs` 非空**且每个 id 都真实命中本次知识库检索**；未命中的引用一律剔除，引用了不存在来源的 `A`/`B` 结论会降级为 `C`（措辞同时被弱化），确保「无据强结论」无法进入报告。`C` 仅作弱化表述；`N` 必须明确「无法判断」。无知识命中时 `project_rules` / `tech_debt` 为空数组（对应「无知识不强判」）。
 
 `--format md` 即上述 7 段的 Markdown 渲染。
 
@@ -182,9 +188,9 @@ python tests/eval_harness.py # 离线评估指标
 | 2 | `INVALID_REQUEST` | 参数/输入错误 |
 | 3 | `NOT_CONFIGURED` | 服务/连接未配置 |
 | 4 | `GIT_*` | 本地 Git 不可用/鉴权/无权限/未找到 |
-| 5 | `LLM_*` | 模型不可用/超时/限流/输出异常 |
+| 5 | `LLM_*` | 模型不可用/超时/限流/**输出结构异常** |
 | 6 | `KB_UNAVAILABLE` | 知识库不可用 |
-| 99 | `INTERNAL_ERROR` / `SECURITY_ERROR` | 内部错误 / 安全操作失败 |
+| 99 | `INTERNAL_ERROR` | 内部错误 |
 
 错误时统一输出信封 `{"error":{"code":"...","message":"..."}}`（默认 stdout，可用 `--error-stream stderr` 切换）。
 
@@ -221,10 +227,17 @@ for risk in report["risk"]:
 `check --fail-on <spec>` 命中策略时返回专用退出码 7（`GATE_FAILED`），并在 stderr 打印命中原因；未命中返回 0。报告始终正常输出到 stdout，便于定位。
 
 规则格式 `section:value`（可重复）：
-- `risk:high` / `risk:medium` / `risk:low`：风险等级 ≥ 阈值即拦截（high 最严）
+- `risk:high` / `risk:medium` / `risk:low`：风险等级 ≥ 阈值即拦截（阈值越低越严，`risk:low` 会拦下所有**有据**风险）
 - `rule:violation`：命中项目规范违反即拦截
 - `doc:confirm` / `doc:update`：文档待确认/待更新即拦截
 - `debt:direct_match` / `debt:related`：高度相关的技术债务即拦截
+
+**证据门槛**：`risk:*` 只在风险项证据等级为 `A`/`B`（有可溯源知识库来源）时拦截。
+`C` 级是「仅凭 Diff / 通用经验推断」、`N` 级是「无法判断」，凭推断阻断推送没有意义。
+因此**未配置知识库时 `risk:*` 实际不会触发**——这是「无证据不强判」的直接后果，
+需要该闸门生效请先配置 `KB_*` 并 `kb upload` 相关规范。
+`rule:*` / `debt:*` 的强结论同样已由 Evidence 后校验强制要求 `A`/`B` 证据；
+`doc:*` 的 `confirm`/`update` 本身即「建议确认」语义，不额外设门槛。
 
 ```bash
 python bin/pr_check_cli.py check --diff pr.diff --fake --fail-on risk:high --fail-on rule:violation
@@ -259,3 +272,6 @@ A. 未配置 `LLM_*` 时自检仍返回基础风险段（降级契约）；配�
 
 **Q2. 错误返回非 0 但无 500？**
 A. 正常业务错误（Git/LLM/KB/参数）都走统一信封 + 对应退出码（2–6/99），不应出现未捕获异常。
+
+**Q3. 退出码 5（`LLM_INVALID_OUTPUT`）怎么排查？**
+A. 表示模型返回的内容**无法被当作报告使用**，分两种：响应体不是 JSON（网关/代理拦截），或 JSON 可解析但字段结构不符合约定（字段缺失、枚举取值大小写不符、类型错误）。错误信封的 `message` 会列出具体字段路径与原因，据此判断是提示词问题还是模型能力问题。该场景不会返回半成品报告。

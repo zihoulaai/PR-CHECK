@@ -11,9 +11,7 @@ import uuid
 
 from app.adapters.base import (
     GitCredential,
-    GitPlatformAdapter,
     KbDocInput,
-    LLMClient,
     MRItem,
     ProjectItem,
 )

@@ -36,31 +36,22 @@ def build_kb_query(pr: PRMetadata, profile: ChangeProfile) -> KBQuery:
         focus.add("technical_debt")
         focus.add("historical_risk")
 
-    # 变更类型专属数组（用文件路径做可检索文本）
-    api_files, data_files, config_files, logging_files = [], [], [], []
-    for f in profile.files:
-        cts = [ct.value for ct in profile.change_types]
-        # 文件级归类（近似）：依据路径/扩展名
-        low = f.path.lower()
-        if "controller" in low or "router" in low or "resource" in low or low.endswith(".yml") is False and "api" in low:
-            api_files.append(f.path)
-        if any(p in low for p in ("entity", "model", "dto", "schema", "domain")):
-            data_files.append(f.path)
-        if low.endswith((".yml", ".yaml", ".properties", ".toml", ".ini", ".env")) or "config" in low:
-            config_files.append(f.path)
-
+    # 变更类型对应的文件清单直接取自 ChangeProfile（由 diff 解析的判定结果归集），
+    # 不在这里按路径另写一套启发式：两套规则必然漂移，且旧实现把
+    # resources/ 静态资源误判为 API 变更。
     return KBQuery(
-        project=pr.project or (pr.path_with_namespace if hasattr(pr, "path_with_namespace") else "") or pr.repository,
+        project=pr.project or pr.repository,
         modules=list(profile.modules[:10]),
         pr_title=pr.title,
         pr_description=pr.description,
         key_files=[f.path for f in profile.files][:20],
         key_symbols=[s.name for s in profile.symbols][:30],
         change_types=[ct.value for ct in profile.change_types],
-        api_changes=api_files[:10],
-        data_changes=data_files[:10],
-        config_changes=config_files[:10],
-        logging_changes=logging_files[:10],
+        api_changes=profile.api_changes[:10],
+        data_changes=profile.data_changes[:10],
+        config_changes=profile.config_changes[:10],
+        dependency_changes=profile.dependency_changes[:10],
+        logging_changes=profile.logging_changes[:10],
         keywords=list(profile.keywords[:20]),
         focus=sorted(focus),
     )

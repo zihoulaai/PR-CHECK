@@ -102,9 +102,3 @@ class NotConfiguredError(AppError):
 class ValidationError(AppError):
     code = "INVALID_REQUEST"
     status_code = 400
-
-
-class SecurityError(AppError):
-    code = "SECURITY_ERROR"
-    status_code = 500
-    friendly_message = "安全相关操作失败，请检查服务端配置。"

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
 
 from app.config import Settings, get_settings
 from app.domain.enums import AnalysisMode, ChangeType, HighImpactFeature
@@ -16,17 +15,22 @@ from app.parser.diff_parser import ParsedFile, get_language_parser
 # 用于关键词提取的分词（去掉常见标点）
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# 重点 Diff 保留的高影响特征（Medium 模式）
-_FOCUS_FEATURES = {
-    HighImpactFeature.PUBLIC_API,
-    HighImpactFeature.DATABASE,
-    HighImpactFeature.CONFIGURATION,
-    HighImpactFeature.PERMISSION,
-    HighImpactFeature.TRANSACTION,
-    HighImpactFeature.CACHE,
-    HighImpactFeature.EXTERNAL_DEPENDENCY,
-    HighImpactFeature.LOGGING,
+# 变更类型 → ChangeProfile 中对应的文件清单字段。
+# 只有会流向 KB 检索（KBQuery）的类型才登记；未登记的类型仍计入 change_types，
+# 不额外保留一份无人消费的文件清单。
+_TYPE_TO_FIELD = {
+    ChangeType.API_CHANGE: "api_changes",
+    ChangeType.DATA_MODEL_CHANGE: "data_changes",
+    ChangeType.CONFIG_CHANGE: "config_changes",
+    ChangeType.DEPENDENCY_CHANGE: "dependency_changes",
+    ChangeType.LOGGING_CHANGE: "logging_changes",
 }
+
+# 重点 Diff 保留的高影响特征（Medium 模式）
+# 必须覆盖 HighImpactFeature 的全部取值：只要存在高影响特征却不在此集合内，
+# select_focused_diff 会走「无重点特征」回退分支把整个 diff 送进 LLM，
+# focused 模式反而退化为 full，控制上下文的初衷失效。
+_FOCUS_FEATURES = set(HighImpactFeature)
 
 
 def _extract_keywords(symbols: list[Symbol], files: list[FileChange], pr: PRMetadata) -> list[str]:
@@ -59,6 +63,7 @@ def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
     change_types: list[ChangeType] = []
     high_impact: list[HighImpactFeature] = []
     modules: set[str] = set()
+    per_type: dict[str, list[str]] = {f: [] for f in _TYPE_TO_FIELD.values()}
 
     for pf in parsed:
         fc = FileChange(
@@ -79,6 +84,15 @@ def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
         cts, his = detect_change_types(pf.path, pf.lines, lang_parser, pf.language)
         change_types.extend(cts)
         high_impact.extend(his)
+        # 回填到 ParsedFile，供 select_focused_diff 复用，避免重复检测
+        pf.change_types = list(cts)
+        pf.high_impact = list(his)
+        # 按变更类型归集文件：这是「哪些文件属于 API/配置/日志变更」的唯一事实来源，
+        # KB 查询直接消费这些字段，不再各自用启发式重新推断路径。
+        for ct in cts:
+            bucket = _TYPE_TO_FIELD.get(ct)
+            if bucket is not None:
+                per_type[bucket].append(pf.path)
 
     # 去重并保持出现顺序（Pydantic 模型不可哈希，需按关键字段去重）
     def _dedup_enums(seq):
@@ -114,10 +128,15 @@ def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
         keywords=_extract_keywords(symbols, files, pr),
         analysis_mode=analysis_mode,
         changed_lines=changed_lines,
+        **per_type,
     )
 
 
 def _classify_mode(n_files: int, changed_lines: int, settings: Settings) -> AnalysisMode:
+    # 无文件或无有效增删行（二进制 / 纯权限变更 / 空 diff / 纯重命名）：
+    # 没有可交给 LLM 分析的内容，直接走 summary_only，避免拿空输入调模型。
+    if n_files == 0 or changed_lines == 0:
+        return AnalysisMode.SUMMARY_ONLY
     # Large：文件数或行数超过中档上限
     if n_files > settings.medium_max_files or changed_lines > settings.medium_max_lines:
         return AnalysisMode.SUMMARY_ONLY
@@ -129,7 +148,11 @@ def _classify_mode(n_files: int, changed_lines: int, settings: Settings) -> Anal
 
 
 def select_focused_diff(parsed: list[ParsedFile], profile: ChangeProfile) -> str:
-    """Medium 模式：仅保留高影响文件对应的 diff 片段，控制 LLM 上下文规模。"""
+    """Medium 模式：仅保留高影响文件对应的 diff 片段，控制 LLM 上下文规模。
+
+    依赖 build_change_profile 已把 change_types / high_impact 回填到 ParsedFile；
+    未回填时按「无重点信息」处理（保留全部），不会误裁剪。
+    """
     keep_features = set(profile.high_impact_features) & _FOCUS_FEATURES
     # 若没有任何重点特征，回退保留全部（避免空 context）
     if not keep_features:
@@ -137,8 +160,6 @@ def select_focused_diff(parsed: list[ParsedFile], profile: ChangeProfile) -> str
 
     kept: list[str] = []
     for pf in parsed:
-        lang_parser = get_language_parser(pf.language)
-        _, his = detect_change_types(pf.path, pf.lines, lang_parser, pf.language)
-        if (set(his) & keep_features) or pf.status in ("added", "deleted"):
+        if (set(pf.high_impact) & keep_features) or pf.status in ("added", "deleted"):
             kept.append(pf.block_text)
     return "\n".join(kept) if kept else "\n".join(pf.block_text for pf in parsed)

@@ -50,22 +50,14 @@ class MaaSVectorKBAdapter:
                 data = resp.json()
         except httpx.HTTPError as exc:
             raise KbError(f"知识库检索失败：{exc}") from exc
+        except ValueError as exc:  # 响应体非 JSON（网关错误页等）
+            raise KbError(f"知识库返回了非 JSON 响应：{exc}") from exc
 
-        hits: list[KBHit] = []
-        for h in data.get("hits", []) if isinstance(data, dict) else []:
-            # 服务端按 project 强制过滤；双重保险
-            if h.get("project") and h["project"] != query.project:
-                continue
-            hits.append(KBHit(
-                id=h.get("id", ""),
-                title=h.get("title", ""),
-                doc_type=h.get("doc_type", ""),
-                module=h.get("module", ""),
-                project=h.get("project", query.project),
-                snippet=h.get("snippet", ""),
-                score=float(h.get("score", 0.0)),
-            ))
-        return hits
+        try:
+            return _to_hits(data, query.project)
+        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            # 响应结构异常：同样降级为 KbError，交由 workflow 降级为基础自检
+            raise KbError(f"知识库返回结构异常：{exc}") from exc
 
     def upload(self, doc: KbDocInput) -> str:
         doc_id = f"kb-{uuid.uuid4().hex[:12]}"
@@ -87,10 +79,37 @@ class MaaSVectorKBAdapter:
                     raise KbError("知识库文档上传失败。")
         except httpx.HTTPError as exc:
             raise KbError(f"知识库文档上传失败：{exc}") from exc
+        except ValueError as exc:
+            raise KbError(f"知识库返回了非 JSON 响应：{exc}") from exc
         return doc_id
 
 
+def _to_hits(data, project: str) -> list[KBHit]:
+    """把检索响应转为 KBHit 列表；结构异常向上抛，由 search 统一转 KbError。"""
+    hits: list[KBHit] = []
+    raw_hits = data.get("hits", []) if isinstance(data, dict) else []
+    for h in raw_hits:
+        # 服务端按 project 强制过滤；双重保险
+        if h.get("project") and h["project"] != project:
+            continue
+        hits.append(KBHit(
+            id=h.get("id", ""),
+            title=h.get("title", ""),
+            doc_type=h.get("doc_type", ""),
+            module=h.get("module", ""),
+            project=h.get("project", project),
+            snippet=h.get("snippet", ""),
+            score=float(h.get("score", 0.0)),
+        ))
+    return hits
+
+
 def _build_query_text(query: KBQuery) -> str:
+    """拼检索用的自然语言 query 文本。
+
+    KB 服务端只强制按 project 过滤，其余全靠这段文本召回，所以各变更类型的文件
+    清单必须落到文本里：只放在请求体的结构化字段中是无效的（服务端不消费）。
+    """
     parts = [f"项目：{query.project}"]
     if query.modules:
         parts.append("模块：" + ", ".join(query.modules))
@@ -98,6 +117,18 @@ def _build_query_text(query: KBQuery) -> str:
         parts.append(f"PR：{query.pr_title}")
     if query.change_types:
         parts.append("变更类型：" + ", ".join(query.change_types))
+    # 按变更类型给出文件清单：比裸路径更利于召回对应规范/技术债文档
+    for label, paths in (
+        ("接口变更文件", query.api_changes),
+        ("数据模型变更文件", query.data_changes),
+        ("配置变更文件", query.config_changes),
+        ("依赖变更文件", query.dependency_changes),
+        ("日志变更文件", query.logging_changes),
+    ):
+        if paths:
+            parts.append(f"{label}：" + ", ".join(paths))
+    if query.key_symbols:
+        parts.append("关键符号：" + ", ".join(query.key_symbols[:15]))
     if query.keywords:
         parts.append("关键词：" + ", ".join(query.keywords[:20]))
     if query.focus:

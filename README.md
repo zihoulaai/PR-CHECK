@@ -81,6 +81,8 @@ python bin/pr_check_cli.py hook uninstall
 
 规则格式 `section:value`（可重复）：`risk:high` / `rule:violation` / `doc:confirm` / `debt:direct_match` 等。详见 `docs/USAGE.md §12`。
 
+> **证据门槛**：`risk:*` 只在风险项证据等级为 `A`/`B`（有可溯源知识库来源）时拦截；`C` 级（仅凭 Diff/经验推断）与 `N` 级（无法判断）不阻断——凭推断硬拦推送只会训练使用者 `--no-verify`。因此未配置知识库时 `risk:*` 实际不会触发。
+
 ---
 
 ## 知识库（KB）
@@ -104,6 +106,11 @@ python bin/pr_check_cli.py kb list --project team/order
 | `full` | ≤20 文件 且 ≤800 行 | 完整 Diff 送 LLM 分析 |
 | `focused` | 21–80 文件 或 801–3000 行 | 仅保留高影响文件 Diff 送 LLM |
 | `summary_only` | >80 文件 或 >3000 行 | 仅摘要 + 基础风险 + 人工清单，不进完整 LLM |
+| `summary_only` | 0 文件 或 0 增删行 | 空 Diff / 纯二进制·权限变更 / 纯重命名，不调 LLM |
+
+「高影响特征」覆盖 `HighImpactFeature` 全部取值（公共 API、数据库、配置、权限、事务、缓存、序列化、并发、外部依赖、日志）；`focused` 下若变更不含任何高影响特征则保留全部 Diff。
+
+**模块推导**：跳过 `src` / `lib` / `app` / `main` / `java` / `resources` / `test` 等纯布局目录，取第一个有业务语义的目录段（`src/main/java/com/x/Foo.java` → `com`）；`core` / `common` / `server` 视为真实模块名。
 
 ---
 
@@ -121,7 +128,7 @@ python bin/pr_check_cli.py kb list --project team/order
 | 6 人工清单 | `manual_checklist[]` | 需人工确认的事项 |
 | 7 知识来源 | `kb_sources[]` | 本次引用的知识文档 |
 
-**Evidence 等级强制规则**：`A`/`B` 必须 `source_refs` 非空（可溯源）；`C` 仅作弱化表述；`N` 必须明确「无法判断」。无知识命中时 `project_rules` / `tech_debt` 为空数组（对应「无知识不强判」）。`--format md` 即 7 段的 Markdown 渲染。
+**Evidence 等级强制规则**：`A`/`B` 必须 `source_refs` 非空**且每个 id 都真实命中本次知识库检索**（未命中的引用会被剔除，伪造引用的强结论降级为 `C`）；`C` 仅作弱化表述；`N` 必须明确「无法判断」。无知识命中时 `project_rules` / `tech_debt` 为空数组（对应「无知识不强判」）。`--format md` 即 7 段的 Markdown 渲染。
 
 ---
 
@@ -130,6 +137,7 @@ python bin/pr_check_cli.py kb list --project team/order
 | 变量 | 说明 | 必填 |
 |---|---|---|
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI 兼容端点（MaaS / Azure / 本地 vLLM） | 否（未配则报告无 LLM 段落，仍返回基础风险） |
+| `LLM_MAX_RETRIES` | 总尝试次数（含首次），默认 1 = 不重试；仅对 429/408/5xx 与网络异常生效 | 否 |
 | `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | MaaS Vector KB（项目知识库） | 否 |
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
@@ -166,8 +174,8 @@ flowchart TD
 
 ## 关键契约
 
-- **统一错误格式** `{error:{code,message}}`，绝不泄露 Token / 堆栈；退出码 0（成功）/ 2（`INVALID_REQUEST`）/ 3（`NOT_CONFIGURED`）/ 4（`GIT_*`，本地 Git 不可用/鉴权/无权限/未找到）/ 5（`LLM_*`）/ 6（`KB_UNAVAILABLE`）/ 7（`GATE_FAILED`）/ 99（`INTERNAL_ERROR`/`SECURITY_ERROR`）。
-- **Evidence 等级 A/B/C/N**：A/B 须 `source_refs` 非空；C 仅弱化表述；N 须「无法判断」。
+- **统一错误格式** `{error:{code,message}}`，绝不泄露 Token / 堆栈；退出码 0（成功）/ 2（`INVALID_REQUEST`）/ 3（`NOT_CONFIGURED`）/ 4（`GIT_*`，本地 Git 不可用/鉴权/无权限/未找到）/ 5（`LLM_*`，含返回 JSON 结构不合契约）/ 6（`KB_UNAVAILABLE`）/ 7（`GATE_FAILED`）/ 99（`INTERNAL_ERROR`）。
+- **Evidence 等级 A/B/C/N**：A/B 须 `source_refs` 非空**且来源真实命中本次检索**（伪造引用 → 降 C 并剥离）；C 仅弱化表述；N 须「无法判断」。
 - **知识库检索按 `project` 强制过滤**，跨项目拒绝。
 - **失败降级**：Git 失败即终止；KB 失败降级为基础自检（报告无知识段落）；LLM **未配置**时降级为基础风险报告（无 LLM 综合段落）；LLM **已配置但调用失败**则整体失败（不返回半成品）。
 

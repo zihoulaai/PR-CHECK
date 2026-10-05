@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     llm_api_key: str | None = None
     llm_timeout_seconds: int = 120
+    # 总尝试次数（含首次）。1 = 不重试；仅对 429 / 408 / 5xx 与网络层异常生效，
+    # 其余 4xx 直接失败。调大前请确认上游配额可承受。
     llm_max_retries: int = 1
 
     # KB

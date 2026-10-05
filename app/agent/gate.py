@@ -3,18 +3,30 @@
 闸门与「基础设施错误」解耦：报告成功生成后，若命中 --fail-on 策略，
 check 返回专用退出码 GATE_FAILED（而非 EXIT_OK），git hook 据此中断推送。
 
+证据门槛：risk:* 仅在证据等级为 A/B 时拦截。C 级是「仅凭 Diff / 通用经验推断」，
+N 级是「无法判断」——凭推断或凭无知阻断推送没有意义，只会让使用者习惯性
+--no-verify。因此未配置知识库（拿不到可溯源来源）时 risk:* 实际不会触发，
+这是「无证据不强判」的直接后果。
+rule:* 与 debt:* 的强结论本身已由 Evidence 后校验强制要求 A/B 证据；
+doc:* 的 confirm/update 本身就是「建议确认」语义，故不额外设门槛。
+
 规则格式（--fail-on 可重复）：<section>:<value>
-- risk:high  / risk:medium / risk:low   （risk 等级 >= 阈值即拦截；high 最严）
+- risk:high  / risk:medium  / risk:low   （risk 等级 >= 阈值即拦截；阈值越低越严）
 - rule:violation                       （命中项目规范违反即拦截）
 - doc:confirm / doc:update             （文档待确认/待更新即拦截）
 - debt:direct_match / debt:related     （高度相关的技术债务即拦截）
 """
 from __future__ import annotations
 
-from app.domain.enums import DocCheckVerdict, RiskLevel, RuleVerdict, TechDebtVerdict
+from app.domain.enums import (
+    DocCheckVerdict, EvidenceLevel, RiskLevel, RuleVerdict, TechDebtVerdict,
+)
 from app.domain.schemas import CheckReport
 
 _RISK_RANK = {RiskLevel.LOW: 1, RiskLevel.MEDIUM: 2, RiskLevel.HIGH: 3}
+
+# 具备可溯源证据的等级；C（纯推断）/ N（无法判断）不作为拦截依据
+_BLOCKING_EVIDENCE = {EvidenceLevel.A, EvidenceLevel.B}
 
 _SECTION_VALUES = {
     "risk": {"high", "medium", "low"},
@@ -55,6 +67,8 @@ def evaluate_gate(report: CheckReport, specs: "list[tuple[str, str]]") -> list[s
         if section == "risk":
             threshold = _RISK_RANK[RiskLevel(value)]
             for r in report.risk:
+                if r.evidence_level not in _BLOCKING_EVIDENCE:
+                    continue  # 无可溯源证据的推断 / 无法判断，不阻断
                 if _RISK_RANK[r.level] >= threshold:
                     violations.append(f"风险等级 {r.level.value}：{r.text}")
                     break

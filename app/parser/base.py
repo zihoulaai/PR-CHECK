@@ -56,17 +56,43 @@ class LineChange(NamedTuple):
     change: str  # added / removed / context
 
 
+# 纯布局约定目录：这些段不携带业务语义，derive_module 会跳过它们。
+# 刻意不包含 core / common / server / client —— 这些常常就是真实的模块名。
+_LAYOUT_DIRS = {
+    "src", "source", "sources", "main", "java", "kotlin", "scala", "groovy",
+    "resources", "resource", "lib", "libs", "app", "apps", "packages", "pkg",
+    "bin", "dist", "build", "out", "target", "static", "public", "private",
+    "web", "www", "webapp", "module", "modules", "test", "tests", "testing",
+    "node_modules", "web-inf", "meta-inf",
+}
+
+
 def detect_language(path: str) -> str | None:
     ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path else ""
     return _EXT_MAP.get(ext)
 
 
 def derive_module(path: str) -> str:
+    """推导模块名：跳过纯布局目录，取第一个有业务语义的目录段。
+
+    只取第一级会让 src/ 布局的仓库 module 恒为 "src"，KB 的 modules 过滤与报告
+    「涉及模块」都会失效。例：
+        src/main/java/com/x/Foo.java        -> com
+        src/refund/RefundController.java   -> refund
+        app/adapters/base.py                -> adapters
+        src/a/b.py                          -> a
+    整条路径都是布局段时回退到第一级目录；只有单个文件名时回退到文件名。
+    """
     norm = path.replace("\\", "/").strip("/")
     parts = [p for p in norm.split("/") if p]
     if not parts:
         return ""
-    # 取仓库内第一级目录作为模块；根目录文件无模块
+    dirs = parts[:-1]  # 末段是文件名
+    for d in dirs:
+        if d.lower() not in _LAYOUT_DIRS:
+            return d
+    if dirs:
+        return dirs[0]
     return parts[0]
 
 
@@ -117,6 +143,47 @@ class LanguageParser(ABC):
 def path_has_any(path: str, patterns: tuple[str, ...]) -> bool:
     low = path.lower().replace("\\", "/")
     return any(p in low for p in patterns)
+
+
+# 关键词驱动的变更类型识别规则。
+#
+# 匹配对象是「小写化后的改动行全文」，因此不能用 \b 词边界：camelCase 标识符
+# 小写化后单词会粘连（getAuthInfo -> getauthinfo），加 \b 会漏掉 getAuthInfo /
+# cacheKey / transactionManager 这类最常见的写法。所以这里用「词干 + \w*」形式
+# 保持足够宽的覆盖面，再用否定断言逐个排除真正会误判的英文词。
+#
+# 关键取舍（曾经的误报来源）：
+#   auth(?!or)  裸子串 "auth" 会命中 author / authors / authored / authorName
+#               （署名、模板变量、审计字段），把普通 POJO 判成权限变更。
+#               排除 or 前缀后仍覆盖 checkauth / getauthtoken / userauth / oauth，
+#               而 authorization / authenticate 由各自词干单独覆盖。
+#   serializ    词干取 serializ 而非 serial，避免命中 Java 序列化样板
+#               serialVersionUID（它表示「类实现了 Serializable」，不是序列化行为变更）。
+_KEYWORD_RULES: tuple[tuple[tuple[re.Pattern, ...], ChangeType, HighImpactFeature], ...] = (
+    (
+        (re.compile(r"transaction\w*"), re.compile(r"事务")),
+        ChangeType.TRANSACTION_CHANGE, HighImpactFeature.TRANSACTION,
+    ),
+    (
+        (re.compile(r"cach\w*"), re.compile(r"缓存"), re.compile(r"redis\w*")),
+        ChangeType.CACHE_CHANGE, HighImpactFeature.CACHE,
+    ),
+    (
+        (re.compile(r"serializ\w*"), re.compile(r"反序列化")),
+        ChangeType.SERIALIZATION_CHANGE, HighImpactFeature.SERIALIZATION,
+    ),
+    (
+        (
+            re.compile(r"auth(?!or)"),
+            re.compile(r"authoriz\w*"),
+            re.compile(r"authenticat\w*"),
+            re.compile(r"@secured"),
+            re.compile(r"permission"),
+            re.compile(r"权限"),
+        ),
+        ChangeType.AUTH_CHANGE, HighImpactFeature.PERMISSION,
+    ),
+)
 
 
 def detect_change_types(path: str, lines: list[LineChange], lang_parser: LanguageParser | None,
@@ -184,14 +251,8 @@ def detect_change_types(path: str, lines: list[LineChange], lang_parser: Languag
 
     # 关键词驱动的 AUTH/CACHE/TRANSACTION/SERIALIZATION
     blob = " ".join(t for t, _ in added_removed).lower()
-    _kw = {
-        ("@transactional", "transaction", "事务"): (ChangeType.TRANSACTION_CHANGE, HighImpactFeature.TRANSACTION),
-        ("@cacheable", "cache", "缓存", "redis"): (ChangeType.CACHE_CHANGE, HighImpactFeature.CACHE),
-        ("serialize", "反序列化", "serializ"): (ChangeType.SERIALIZATION_CHANGE, HighImpactFeature.SERIALIZATION),
-        ("@preauthorize", "@secured", "permission", "权限", "auth"): (ChangeType.AUTH_CHANGE, HighImpactFeature.PERMISSION),
-    }
-    for kws, (ct, hi) in _kw.items():
-        if any(k in blob for k in kws):
+    for patterns, ct, hi in _KEYWORD_RULES:
+        if any(p.search(blob) for p in patterns):
             if ct not in change_types:
                 change_types.append(ct)
             if hi not in high_impact:

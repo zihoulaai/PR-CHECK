@@ -11,13 +11,22 @@ import os
 import subprocess
 import sys
 
-import pytest
-
-from bin.pr_check_cli import cmd_check, cmd_version
+from app.adapters.fakes import FakeLLM
+from bin.pr_check_cli import cmd_check, cmd_version, main
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CLI = os.path.join(REPO_ROOT, "bin", "pr_check_cli.py")
 FIXTURE = os.path.join(REPO_ROOT, "tests", "fixtures", "sample_refund.diff")
+
+
+class _BrokenKB:
+    """模拟适配器边界未预料的异常（响应体非 JSON）。"""
+
+    def search(self, query):
+        raise json.JSONDecodeError("bad body", "x", 0)
+
+    def upload(self, doc):
+        return "kb-x"
 
 
 def _ns(**over):
@@ -77,3 +86,23 @@ def test_cli_stdin_pipe():
     assert proc.returncode == 0
     body = json.loads(proc.stdout)
     assert body["meta"]["analysis_mode"] in ("full", "summary_only")
+
+
+def test_cli_llm_invalid_output_exits_5(container, capsys):
+    """LLM 输出结构不合契约：退出码必须是 5（LLM_INVALID_OUTPUT），而非 99。"""
+    container.llm = FakeLLM(report_override={
+        "summary": "s", "risk": [{"level": "HIGH", "text": "t"}],
+    })
+    rc = main(["check", "--diff", FIXTURE, "--project", "team/order"])
+    assert rc == 5
+    body = json.loads(capsys.readouterr().out)
+    assert body["error"]["code"] == "LLM_INVALID_OUTPUT"
+
+
+def test_cli_kb_unavailable_exits_6(container, capsys):
+    """KB 适配器抛出非 KbError：降级为基础自检并返回 0，不得变成 99。"""
+    container.kb = _BrokenKB()
+    rc = main(["check", "--diff", FIXTURE, "--project", "team/order"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert json.loads(out)["meta"]["kb_status"] == "failed"

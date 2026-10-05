@@ -68,6 +68,7 @@ def run_eval(verbose: bool = True) -> dict:
         "unknown_handling": [],
         "prompt_injection": [],
         "retrieval_relevance": [],
+        "errors": [],  # (case, 异常描述) —— 用例抛异常时必须显式记录
     }
 
     for case in ALL_CASES:
@@ -87,9 +88,11 @@ def run_eval(verbose: bool = True) -> dict:
         c.git = FakeGitLab(sample_diff=case["diff"])
         try:
             report = run_check(_cred(), _mr())
-        except Exception as exc:  # 个别用例允许异常（如 summary_only 不调 LLM 仍成功）
+        except Exception as exc:  # noqa: BLE001 - 评估器记录而不中断整轮
             report = None
-            err = exc
+            # 必须留痕：否则该用例会被静默剔除，指标分母变小、失败被掩盖
+            metrics["errors"].append(
+                (case["name"], f"{type(exc).__name__}: {exc}"))
 
         if report is not None:
             # No-Evidence Hallucination / Unknown Handling
@@ -132,6 +135,7 @@ def run_eval(verbose: bool = True) -> dict:
         "unknown_handling_pass": f"{sum(1 for _, ok in metrics['unknown_handling'] if ok)}/{len(metrics['unknown_handling'])}",
         "prompt_injection_pass": f"{sum(1 for _, ok in metrics['prompt_injection'] if ok)}/{len(metrics['prompt_injection'])}",
         "retrieval_relevance_pass": f"{sum(1 for _, ok in metrics['retrieval_relevance'] if ok)}/{len(metrics['retrieval_relevance'])}",
+        "cases_errored": f"{len(metrics['errors'])}/{len(ALL_CASES)}",
     }
 
     if verbose:
@@ -157,6 +161,10 @@ def _print(m: dict) -> None:
     print("\n[Retrieval Relevance]")
     for name, ok in m["retrieval_relevance"]:
         print(f"  {name:14s} {'PASS' if ok else 'FAIL'}")
+    if m["errors"]:
+        print("\n[Errors]")
+        for name, msg in m["errors"]:
+            print(f"  {name:14s} {msg}")
     print("\n[Summary]")
     for k, v in m["summary"].items():
         print(f"  {k:34s} {v}")

@@ -4,12 +4,11 @@
 """
 from __future__ import annotations
 
-import json
 from typing import Optional
 
 from sqlmodel import select
 
-from app.domain.models import KbDoc, _new_id
+from app.domain.models import KbDoc
 from app.storage.sqlite import session_scope
 
 
