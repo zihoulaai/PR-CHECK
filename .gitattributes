@@ -1,0 +1,5 @@
+# 钩子与 POSIX 包装脚本必须 LF：CRLF 会让部分 shell 把 \r 当成参数的一部分
+# （Git Bash 目前容忍，但依赖这种容忍不可靠，跨平台分发须强制 LF）
+*.sh text eol=lf
+app/hooks/* text eol=lf
+bin/pr-check text eol=lf

@@ -52,6 +52,12 @@ def test_hook_template_is_packaged_resource():
     assert _hook_template("no-such-hook") is None
 
 
+def test_hook_template_is_lf_only():
+    """POSIX 钩子不能带 CRLF：\r 会被 shell 当成参数的一部分（见 .gitattributes）。"""
+    raw = _hook_template("pre-push").read_bytes()
+    assert b"\r\n" not in raw
+
+
 def test_hook_install_source_layout_writes_cli_path(repo):
     """源码模式：配置里写 bin/pr_check_cli.py 绝对路径，钩子按原方式生效。"""
     assert is_source_layout() is True
