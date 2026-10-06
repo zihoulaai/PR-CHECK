@@ -22,6 +22,9 @@ class _EngineHolder:
         if cls._engine is None:
             url = get_settings().database_url
             cls._engine = create_engine(url, connect_args={"check_same_thread": False})
+            # 首次获取引擎即建表：否则 kb upload/list 在生产路径会因表不存在而
+            # 抛 sqlite3.OperationalError -> 顶层兜底成 INTERNAL_ERROR(99)。
+            init_db()
         return cls._engine
 
     @classmethod

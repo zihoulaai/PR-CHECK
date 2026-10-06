@@ -50,12 +50,17 @@ class LocalGitAdapter:
 
     def get_mr(self, cred: GitCredential, ref: MRRef) -> PRMetadata:
         repo = cred.base_url
-        source_branch = _current_branch(repo)
+        # 优先用显式指定的 source（如 check --source <branch/ref>），避免 CI 里
+        # 「对 ref X 自检」却用了当前 HEAD 的标题/作者，导致元数据与 diff 错配，
+        # 进而让 LLM 编造「标题与变更不符」的误判风险。
+        source_ref = ref.source_ref or _current_branch(repo)
         target_branch = ref.base_branch or "main"
-        author = _git(repo, "log", "-1", "--pretty=%an <%ae>").strip()
-        title = _git(repo, "log", "-1", "--pretty=%s").strip() or source_branch
-        description = _git(repo, "log", "-1", "--pretty=%b").strip()
-        updated_at = _git(repo, "log", "-1", "--pretty=%ci").strip()
+        author = _git(repo, "log", "-1", "--pretty=%an <%ae>", source_ref).strip()
+        title = _git(repo, "log", "-1", "--pretty=%s", source_ref).strip() or source_ref
+        description = _git(repo, "log", "-1", "--pretty=%b", source_ref).strip()
+        updated_at = _git(repo, "log", "-1", "--pretty=%ci", source_ref).strip()
+        # 报告中展示真实分支名：source_ref 为 HEAD 时回退到当前分支。
+        source_branch = source_ref if source_ref != "HEAD" else _current_branch(repo)
         project = ref.project.path or repo
         return PRMetadata(
             project=project, repository=repo, pr_id=0,

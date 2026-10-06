@@ -160,6 +160,10 @@ def _brief(exc: PydanticValidationError) -> str:
 def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status) -> CheckReport:
     hit_map = {h.id: h for h in kb_hits}
 
+    # 无知识命中（未配置 / 空 / 检索失败）时，项目规范与技术债务段落必须为空，
+    # 兑现「无知识不强判」的契约；否则 LLM 会凭空生成规范/债务条目污染报告。
+    no_kb = kb_status in (KbStatus.NOT_CONFIGURED, KbStatus.EMPTY, KbStatus.FAILED)
+
     # kb_sources 由 source_refs 映射命中项；未命中源不列入（防止错误引用）
     seen_ids: set[str] = set()
     kb_sources: list[KbSource] = []
@@ -181,8 +185,8 @@ def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status) -
         meta=_meta(pr, profile, mode, kb_status),
         summary=sections.summary,
         doc_check=list(sections.doc_check), risk=list(sections.risk),
-        project_rules=list(sections.project_rules),
-        tech_debt=list(sections.tech_debt),
+        project_rules=[] if no_kb else list(sections.project_rules),
+        tech_debt=[] if no_kb else list(sections.tech_debt),
         manual_checklist=list(sections.manual_checklist) or _default_checklist(),
         kb_sources=kb_sources,
     )

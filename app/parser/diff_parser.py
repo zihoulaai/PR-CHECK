@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass, field
 
@@ -40,8 +41,26 @@ _REGISTRY: dict[str, LanguageParser] = {
 _DEV_NULL = "/dev/null"
 # git diff --git a/<old> b/<new>（old 非贪婪，路径含空格时仍能正确切分）
 _DIFF_GIT_RE = re.compile(r"^a/(?P<old>.+?) b/(?P<new>.+)$")
+# 含非 ASCII / 空格 / 特殊字符的路径被 git 加引号：整条包在双引号内，
+# 非打印字节以八进制 \nnn 表示（如「配置」的 UTF-8 字节 = \346\227\245\345\277\227）。
+_DIFF_GIT_QUOTED_RE = re.compile(r'^"a/(?P<old>.+?)" "b/(?P<new>.+)"$')
 # 路径前缀只从开头剥离一次
 _PREFIX_RE = re.compile(r"^[ab]/")
+
+
+def _decode_git_path(raw: str) -> str:
+    """解码 git core.quotePath 产生的 C-style 引号路径。
+
+    未加引号的普通路径原样返回；加引号路径解八进制转义后按 UTF-8 还原，
+    否则含中文 / 空格的路径会被原样保留为 ``"b/src/..."`` 之类的字符串，
+    进而污染模块名与 LLM 输入。
+    """
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        body = s[1:-1]
+        decoded = codecs.decode(body, "unicode_escape")
+        return decoded.encode("latin-1", "surrogateescape").decode("utf-8", "surrogateescape")
+    return s
 
 
 def get_language_parser(language: str | None) -> LanguageParser | None:
@@ -86,22 +105,23 @@ def _parse_header(header: list[str]) -> dict:
     for raw in header:
         line = raw.rstrip("\r")
         if line.startswith("--- "):
-            old_raw = line[4:].strip()
+            old_raw = _decode_git_path(line[4:].strip())
         elif line.startswith("+++ "):
-            new_raw = line[4:].strip()
+            new_raw = _decode_git_path(line[4:].strip())
         elif line.startswith("rename from "):
-            rename_from = line[len("rename from "):].strip()
+            rename_from = _decode_git_path(line[len("rename from "):].strip())
         elif line.startswith("rename to "):
-            rename_to = line[len("rename to "):].strip()
+            rename_to = _decode_git_path(line[len("rename to "):].strip())
         elif line.startswith("new file mode "):
             new_mode = True
         elif line.startswith("deleted file mode "):
             delete_mode = True
         elif line.startswith("diff --git ") and fallback is None:
             # 无 ---/+++ 的块（二进制 / 纯权限变更）只能从这里取路径
-            m = _DIFF_GIT_RE.match(line[len("diff --git "):])
+            rest = line[len("diff --git "):]
+            m = _DIFF_GIT_RE.match(rest) or _DIFF_GIT_QUOTED_RE.match(rest)
             if m:
-                fallback = m.group("new")
+                fallback = _decode_git_path(m.group("new"))
 
     return {
         "old": old_raw, "new": new_raw,
