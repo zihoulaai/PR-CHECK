@@ -53,10 +53,20 @@ def test_rule_violation_without_evidence_downgraded():
 def test_tech_debt_strong_without_refs_downgraded():
     r = CheckReport(meta=_meta(), tech_debt=[
         TechDebtItem(item="缓存", verdict=TechDebtVerdict.DIRECT_MATCH, evidence_level=EvidenceLevel.B,
-                    source_refs=[]),
+                     source_refs=[]),
     ])
     cleaned = sanitize_report(r, valid_refs=VALID)
     assert cleaned.tech_debt[0].verdict == TechDebtVerdict.POSSIBLE
+
+
+def test_sanitize_risk_keeps_location():
+    """location 是定位指针不是结论：Evidence 清洗不得剥离该字段。"""
+    r = CheckReport(meta=_meta(), risk=[
+        RiskItem(level=RiskLevel.HIGH, text="注意事务", location="src/pay/Refund.java:42",
+                 evidence_level=EvidenceLevel.C, source_refs=[]),
+    ])
+    cleaned = sanitize_report(r, valid_refs=VALID)
+    assert cleaned.risk[0].location == "src/pay/Refund.java:42"
 
 
 def test_valid_report_passes():

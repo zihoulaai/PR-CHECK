@@ -130,6 +130,43 @@ def _emit_error(code: str, message: str, stream: str) -> int:
     return _CODE_TO_EXIT.get(code, EXIT_INTERNAL)
 
 
+def _emit_ci_payload(args: argparse.Namespace, report, violations: list, fail_on: list) -> int:
+    """CI 异步模式输出：报告落盘 + stdout 输出 MR 评论 payload。
+
+    - Markdown 报告写 --output（默认 pr-check-report.md），全量 JSON 写同名 .json；
+    - payload 含 schema / gate / exit_code / report 路径 / note_body（可直接作 MR 评论 body POST）；
+    - 非阻断语义：未显式配 --fail-on 时 gate 不求值（调用方保证），有风险也返回 0；
+      显式配了才命中返回 EXIT_GATE，把「是否失败」留给流水线配置。
+    """
+    md_text = render_markdown(report)
+    out = Path(getattr(args, "output", None) or "pr-check-report.md")
+    json_path = out.with_suffix(".json")
+    out.write_text(md_text, encoding="utf-8")
+    json_path.write_text(
+        json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    rc = EXIT_GATE if violations else EXIT_OK
+    payload = {
+        "schema": "pr-check-ci-payload/1",
+        "project": report.meta.project,
+        "pr_id": report.meta.pr_id,
+        "analysis_mode": report.meta.analysis_mode,
+        "kb_status": report.meta.kb_status,
+        "gate": {"fail_on": list(fail_on), "blocked": bool(violations), "violations": list(violations)},
+        "exit_code": rc,
+        "report": {"markdown": str(out), "json": str(json_path)},
+        "note_body": md_text,
+    }
+    indent = 2 if getattr(args, "pretty", False) else None
+    print(json.dumps(payload, ensure_ascii=False, indent=indent))
+    sys.stderr.write(
+        f"PR_CHECK[ci]: 报告已写入 {out} 与 {json_path}；"
+        f"闸门{'命中' if violations else '未命中'}（退出码 {rc}）\n"
+    )
+    return rc
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     _maybe_enable_fake(args.fake)
 
@@ -168,6 +205,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     else:
         violations = []
 
+    # CI 异步模式：报告落盘 + stdout 输出 MR 评论 payload，闸门语义见 _emit_ci_payload
+    if getattr(args, "ci", False):
+        return _emit_ci_payload(args, report, violations, args.fail_on or [])
+
     if args.format == "md":
         _emit((None, render_markdown(report)), args)
     else:
@@ -194,8 +235,14 @@ def cmd_version(_args: argparse.Namespace) -> int:
 
 
 def cmd_config(args: argparse.Namespace) -> int:
-    """输出配置来源与数据落点，用于排查「凭据到底读的哪份 .env」「kb list 为什么是空的」。"""
+    """config show：排查配置来源；config init：从内嵌模板生成 .env。
+
+    init 默认落用户级配置目录（装机形态推荐位置，全形态稳定、不随 cwd 漂移）；
+    想随仓库走可 ``--path .env``。已存在目标文件时拒绝覆盖，须显式 ``--force``，
+    避免误冲掉已有凭据。
+    """
     from app.config import (
+        ENV_TEMPLATE,
         LEGACY_CWD_DB,
         USER_ENV_FILE,
         active_config_files,
@@ -204,6 +251,17 @@ def cmd_config(args: argparse.Namespace) -> int:
         is_kb_configured,
         is_llm_configured,
     )
+
+    if getattr(args, "action", "show") == "init":
+        target = Path(getattr(args, "path", None) or USER_ENV_FILE)
+        overwritten = target.exists()
+        if overwritten and not getattr(args, "force", False):
+            raise ValidationError(
+                f"{target} 已存在；确认覆盖请加 --force（防止误冲掉已填好的凭据）。")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(ENV_TEMPLATE, encoding="utf-8")
+        _emit({"path": str(target), "created": True, "overwritten": overwritten}, args)
+        return EXIT_OK
 
     s = get_settings()
     files = active_config_files()
@@ -225,6 +283,108 @@ def cmd_config(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ===== shell 补全（候选从 parser 树实时生成，新增子命令/选项零维护）=====
+_BASH_COMPLETION = """\
+# pr-check bash 补全（由 `pr-check completions bash` 生成，请勿手改）。
+# 用法：source <(pr-check completions bash)，或把输出追加到 ~/.bashrc
+_pr_check_completions() {
+    local cmd cur candidates
+    cmd="$1"
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    # 把已输入的词连同当前部分词交给内部命令 __complete 过滤
+    candidates="$("$cmd" __complete "${COMP_WORDS[@]:1:COMP_CWORD-1}" "$cur" 2>/dev/null)"
+    COMPREPLY=( $(compgen -W "$candidates" -- "$cur") )
+}
+complete -F _pr_check_completions pr-check
+"""
+
+_ZSH_COMPLETION = """\
+#compdef pr-check
+# pr-check zsh 补全（由 `pr-check completions zsh` 生成，请勿手改）。
+# 用法：source <(pr-check completions zsh)；或保存为 fpath 下文件 _pr-check
+#（首行 #compdef 即自动注册）。
+_pr_check() {
+    local -a candidates
+    # "${(@)words[2,$CURRENT]}" 必须带引号：非引用展开会丢掉为空的当前词，
+    # 导致 __complete 拿上一个词当前缀（TAB 空前缀场景全错）。
+    candidates=(${(f)"$(${words[1]} __complete "${(@)words[2,$CURRENT]}" 2>/dev/null)"})
+    compadd -- $candidates
+}
+(( $+functions[compdef] )) && compdef _pr_check pr-check
+"""
+
+_FISH_COMPLETION = """\
+# pr-check fish 补全（由 `pr-check completions fish` 生成，请勿手改）。
+# 用法：pr-check completions fish | source
+function __fish_pr_check_candidates
+    set -l tokens (commandline -opc)
+    set -l cmd $tokens[1]
+    set -e tokens[1]
+    # 命令替换可能吞掉 buffer 末尾的空当前词（TAB 空前缀场景），按行尾空格补回；
+    # 已保留时重复补一个空串也无害（__complete 会把多余空串当历史词跳过）。
+    if string match -q -- "* " (commandline)
+        set tokens $tokens ""
+    end
+    $cmd __complete $tokens 2>/dev/null
+end
+complete -c pr-check -f -a '__fish_pr_check_candidates'
+"""
+
+_COMPLETION_SCRIPTS = {
+    "bash": _BASH_COMPLETION,
+    "zsh": _ZSH_COMPLETION,
+    "fish": _FISH_COMPLETION,
+}
+
+
+def cmd_completions(args: argparse.Namespace) -> int:
+    """打印 shell 补全脚本；候选由 parser 树实时生成，无静态脚本漂移。"""
+    print(_COMPLETION_SCRIPTS[args.shell], end="")
+    return EXIT_OK
+
+
+def _subparser_choices(parser: argparse.ArgumentParser) -> dict:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices
+    return {}
+
+
+def _iter_completion_candidates(words: list[str]) -> list[str]:
+    """按已输入词遍历 parser 树，产出补全候选（最后一个词为当前部分词，可为空）。
+
+    - 逐词下钻：命中某层子命令名则进入对应子解析器；
+    - 选项值补全：上一个词是带 choices 的选项时，候选即其可选值；
+    - 否则候选 = 当前层子命令名 + 当前层选项开关（含 -h/--help）。
+    """
+    node = build_parser()
+    for w in words[:-1]:
+        choices = _subparser_choices(node)
+        if choices and w in choices:
+            node = choices[w]
+    prefix = words[-1] if words else ""
+    if len(words) >= 2:
+        prev = words[-2]
+        for action in node._actions:
+            if prev in action.option_strings and action.choices:
+                return [str(c) for c in action.choices if str(c).startswith(prefix)]
+    candidates: list[str] = list(_subparser_choices(node))
+    candidates += [opt for a in node._actions if a.option_strings for opt in a.option_strings]
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in candidates:
+        if c.startswith(prefix) and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _complete_words(words: list[str]) -> int:
+    for cand in _iter_completion_candidates(words):
+        print(cand)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pr-check",
@@ -243,6 +403,8 @@ def build_parser() -> argparse.ArgumentParser:
     # check
     p_check = sub.add_parser("check", help="对 diff 或本地仓库执行完整 PR 自检。")
     p_check.add_argument("--diff", metavar="FILE", help="diff 文件；- 表示从管道读取。")
+    p_check.add_argument("--input", metavar="FILE", default=argparse.SUPPRESS,
+                         help="diff 文件（同 --diff；- 表示从管道读取）。可置于子命令之前或之后。")
     p_check.add_argument("--project", help="项目路径（用于 KB 检索范围与报告标题；可选）。")
     p_check.add_argument("--title", help="PR 标题（diff 模式）。")
     p_check.add_argument("--description", help="PR 描述（diff 模式）。")
@@ -261,15 +423,38 @@ def build_parser() -> argparse.ArgumentParser:
              "格式 section:value，如 risk:high / rule:violation / doc:confirm / doc:update "
              "/ debt:direct_match / debt:related。",
     )
+    p_check.add_argument(
+        "--ci", action="store_true",
+        help="CI 异步模式：报告写入 --output（默认 pr-check-report.md）及同名 .json，"
+             "stdout 改为输出 MR 评论 payload（schema/gate/note_body/report 路径）。"
+             "非阻断语义：未显式传 --fail-on 时不因检出风险而失败，交由流水线决定。",
+    )
+    p_check.add_argument(
+        "-o", "--output", metavar="FILE",
+        help="报告输出文件（配合 --ci 使用；默认 pr-check-report.md，同时写同名 .json 全量报告）。",
+    )
 
     # version
     sub.add_parser("version", help="输出版本信息。")
 
-    # config（排查配置来源与数据落点）
-    p_config = sub.add_parser("config", help="显示生效配置文件、SQLite 路径与 LLM/KB 配置状态。")
+    # completions（shell 补全）
+    p_completions = sub.add_parser(
+        "completions", help="打印 shell 补全脚本（bash/zsh/fish），按提示 source 后生效。")
+    p_completions.add_argument("shell", choices=["bash", "zsh", "fish"], help="目标 shell")
+
+    # config（init 生成 .env / show 排查配置来源与数据落点）
+    p_config = sub.add_parser("config", help="init：从内嵌模板生成 .env；show：显示生效配置文件、SQLite 路径与 LLM/KB 配置状态。")
     p_config.add_argument(
-        "action", nargs="?", choices=["show"], default="show",
-        help="动作（默认 show；写成 pr-check config 亦可）。",
+        "action", nargs="?", choices=["show", "init"], default="show",
+        help="动作（默认 show；写成 pr-check config 亦可）。init 从内嵌模板生成 .env。",
+    )
+    p_config.add_argument(
+        "--path", metavar="FILE",
+        help="init 的目标路径（默认用户级 .env：~/.config/pr-check/.env 或 %%APPDATA%%\\pr-check\\.env）。",
+    )
+    p_config.add_argument(
+        "--force", action="store_true",
+        help="init 允许覆盖已存在的目标文件（默认拒绝，防止误冲掉已填好的凭据）。",
     )
 
     # kb（知识库文档管理，替代原 Web /kb/docs）
@@ -285,6 +470,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_kb_list.add_argument("--project")
     p_kb_list.add_argument("--module")
     p_kb_list.add_argument("--doc-type")
+    p_kb_list.add_argument("--status", choices=["active", "stale"],
+                           help="按状态过滤（默认不过滤；stale=被 --prune 标记的过期来源）。")
+    p_kb_import = kb_sub.add_parser("import", help="批量导入目录下的文档（单篇失败不拖垮整批）。")
+    p_kb_import.add_argument("--dir", required=True, help="待导入目录（递归遍历，跳过隐藏文件）")
+    p_kb_import.add_argument("--project", required=True, help="项目（知识隔离强制过滤）")
+    p_kb_import.add_argument("--doc-type", required=True, choices=[d.value for d in DocType],
+                             help="本批统一的文档类型")
+    p_kb_import.add_argument("--module", default="", help="模块名（可选）")
+    p_kb_import.add_argument("--prune", action="store_true",
+                             help="把本批未覆盖的既有 active 文档标记为 stale（过期），不再参与检索")
+    p_kb_del = kb_sub.add_parser("delete", help="删除知识文档（向量库与本地元数据一并删除）。")
+    p_kb_del.add_argument("--id", required=True, dest="doc_id", help="文档 id（kb list 输出）")
 
     # hook（git 钩子安装/卸载，配合 --fail-on 闸门实现推送拦截）
     p_hook = sub.add_parser("hook", help="管理 git 钩子（pre-push 拦截）。")
@@ -302,6 +499,24 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _kb_upload_one(kb, project: str, module: str, doc_type: str, title: str,
+                   content: str) -> str:
+    """上传单篇文档到向量库并落 metadata，返回 kb id（upload 与 import 共用）。"""
+    doc_id = kb.upload(KbDocInput(
+        project=project, module=module, doc_type=doc_type,
+        title=title, content=content,
+    ))
+    # 元数据落 SQLite（与 KB 向量库分离存储，供 list / 检索过滤；与旧 Web /kb/docs 一致）
+    from app.domain.models import KbDoc
+    from app.storage.repo import insert_kb_doc
+    insert_kb_doc(KbDoc(
+        id=doc_id, project=project, module=module,
+        doc_type=doc_type, title=title,
+        status="active", snippet=content[:500],
+    ))
+    return doc_id
+
+
 def cmd_kb(args: argparse.Namespace) -> int:
     action = getattr(args, "kb_action", None)
     kb = get_container().kb
@@ -315,28 +530,91 @@ def cmd_kb(args: argparse.Namespace) -> int:
         path = Path(args.file)
         if not path.exists():
             raise FileNotFoundError(args.file)
-        content = path.read_text(encoding="utf-8")
-        doc_id = kb.upload(KbDocInput(
-            project=args.project, module=args.module, doc_type=args.doc_type,
-            title=args.title or path.name, content=content,
-        ))
-        # 元数据落 SQLite（与 KB 向量库分离存储，供 list / 检索过滤；与旧 Web /kb/docs 一致）
-        from app.domain.models import KbDoc
-        from app.storage.repo import insert_kb_doc
-        insert_kb_doc(KbDoc(
-            id=doc_id, project=args.project, module=args.module,
-            doc_type=args.doc_type, title=args.title or path.name,
-            status="active", snippet=content[:500],
-        ))
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # 二进制 / 非 UTF-8 文件：友好报错（INVALID_REQUEST → rc 2），
+            # 不再以 UnicodeDecodeError 裸抛落到 INTERNAL_ERROR（rc 99）
+            raise ValidationError(
+                f"文件不是 UTF-8 文本，无法上传：{args.file}（{exc}）。"
+                "请先转换为 UTF-8 文本（如 txt / md）后再上传。"
+            )
+        doc_id = _kb_upload_one(
+            kb, args.project, args.module, args.doc_type,
+            args.title or path.name, content,
+        )
         _emit({"id": doc_id, "project": args.project, "doc_type": args.doc_type,
                "title": args.title or path.name}, args)
         return EXIT_OK
+    if action == "import":
+        return _kb_import(kb, args)
+    if action == "delete":
+        # 先查本地元数据：id 不存在是用户输错（INVALID_REQUEST rc 2），
+        # 而非让向量库先动刀再报错——本地记录是该文档归本工具管理的凭据。
+        # 供应商删除失败抛 KbError → KB_UNAVAILABLE rc 6，本地元数据保留以便重试。
+        from app.storage.repo import delete_kb_doc, list_kb_docs
+
+        known = {d.id for d in list_kb_docs()}
+        if args.doc_id not in known:
+            raise ValidationError(
+                f"本地不存在 id={args.doc_id} 的文档；请先 kb list 确认"
+                f"（删除只接受本工具上传时记录的 id，防误删线上文档）。")
+        kb.delete(args.doc_id)
+        removed = delete_kb_doc(args.doc_id)
+        _emit({"id": args.doc_id, "deleted": True,
+               "local_meta_removed": removed}, args)
+        return EXIT_OK
     # list
     from app.storage.repo import list_kb_docs
-    docs = list_kb_docs(project=args.project, module=args.module, doc_type=args.doc_type)
+    docs = list_kb_docs(project=args.project, module=args.module,
+                        doc_type=args.doc_type, status=getattr(args, "status", None))
     _emit([{"id": d.id, "project": d.project, "module": d.module,
-            "doc_type": d.doc_type, "title": d.title} for d in docs], args)
+            "doc_type": d.doc_type, "title": d.title, "status": d.status}
+           for d in docs], args)
     return EXIT_OK
+
+
+def _kb_import(kb, args: argparse.Namespace) -> int:
+    """kb import：批量导入目录。单篇失败（读取/上传）记入 failed 继续，不拖垮整批。
+
+    退出码：全部成功 0；有失败项 6（KB_UNAVAILABLE 语义的批量版）——stdout 仍是
+    完整摘要 {imported, failed, marked_stale, total}，便于 CI 决策与排查。
+    """
+    root = Path(args.dir)
+    if not root.is_dir():
+        raise ValidationError(f"目录不存在：{args.dir}")
+    files = sorted(p for p in root.rglob("*")
+                   if p.is_file() and not p.name.startswith("."))
+    imported: list[dict] = []
+    failed: list[dict] = []
+    for path in files:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            failed.append({"file": str(path), "error": f"读取失败：{exc}"})
+            continue
+        try:
+            doc_id = _kb_upload_one(kb, args.project, args.module,
+                                    args.doc_type, path.stem, content)
+        except Exception as exc:  # noqa: BLE001 - 批量导入单篇失败不拖垮整批
+            failed.append({"file": str(path), "error": str(exc)})
+            continue
+        imported.append({"id": doc_id, "file": str(path), "title": path.stem})
+
+    marked_stale: list[str] = []
+    if args.prune:
+        from app.storage.repo import mark_kb_docs_stale
+        marked_stale = mark_kb_docs_stale(
+            args.project, args.module or None, {i["id"] for i in imported},
+        )
+
+    _emit({"imported": imported, "failed": failed,
+           "marked_stale": marked_stale, "total": len(files)}, args)
+    sys.stderr.write(
+        f"PR_CHECK[kb-import]: 共 {len(files)} 个文件：成功 {len(imported)}，"
+        f"失败 {len(failed)}，标记过期 {len(marked_stale)}\n"
+    )
+    return EXIT_OK if not failed else EXIT_KB
 
 
 # ===== hook 子命令（git 钩子安装/卸载） =====
@@ -383,6 +661,18 @@ def _posix(p: str | Path) -> str:
     return str(p).replace(os.sep, "/")
 
 
+def _is_pr_check_hook(path: str) -> bool:
+    """判断 hook 文件是否由 pr-check 安装（模板内的 PRCHECK_MANAGED_HOOK 标记）。
+
+    只读前 4KB 二进制匹配：抗 CRLF 与编码差异；文件不可读时视为非本工具钩子。
+    """
+    try:
+        with open(path, "rb") as fh:
+            return b"PRCHECK_MANAGED_HOOK" in fh.read(4096)
+    except OSError:
+        return False
+
+
 def _hook_install(args: argparse.Namespace) -> int:
     import shutil
 
@@ -409,23 +699,54 @@ def _hook_install(args: argparse.Namespace) -> int:
         f.write('PR_CHECK_FAIL_ON="' + " ".join(fail_on) + '"\n')
 
     dest = os.path.join(root, ".git", "hooks", hook_name)
+    backup = dest + ".pr-check-backup"
+    backed_up = False
+    if os.path.isfile(dest) and not _is_pr_check_hook(dest):
+        if not os.path.isfile(backup):
+            os.replace(dest, backup)
+            backed_up = True
     shutil.copyfile(template, dest)
     os.chmod(dest, 0o755)
     mode = "源码脚本" if is_source_layout() else f"python -m {CLI_MODULE}"
     print(f"已安装 {hook_name} 钩子到 {dest}")
+    if backed_up:
+        print(f"原 {hook_name} 钩子已备份到 {backup}（卸载时自动恢复，或手动合并）")
     print(f"配置写入 {cfg_path}（project={args.project}, base={args.base}, "
           f"fail-on={' '.join(fail_on)}，调用方式：{mode}）")
+
+    # 闸门默认 risk:high / rule:violation，二者都要求 A/B 级知识库证据；
+    # 未配 KB 时永不触发，安装时必须明示，避免「以为受保护」的信任陷阱。
+    from app.config import get_settings, is_kb_configured
+    if not is_kb_configured(get_settings()):
+        print("提示：未检测到知识库配置（KB_BASE_URL / KB_API_KEY）。")
+        print("      未配置知识库时，--fail-on risk:* 与 rule:violation 依赖的 A/B 级证据不可得，闸门不会触发；")
+        print("      配置并 kb upload 规范后请重跑 pr-check hook install。")
     return EXIT_OK
 
 
 def _hook_uninstall(args: argparse.Namespace) -> int:
     root = _git_toplevel()
     dest = os.path.join(root, ".git", "hooks", args.hook_name)
+    backup = dest + ".pr-check-backup"
     if os.path.isfile(dest):
-        os.remove(dest)
-        print(f"已移除钩子 {dest}")
+        if not _is_pr_check_hook(dest):
+            # 别人的钩子（husky / lefthook / 手写）：误删会静默破坏用户既有拦截
+            print(f"警告：{dest} 不是 pr-check 安装的钩子，未删除。")
+        else:
+            os.remove(dest)
+            if os.path.isfile(backup):
+                os.replace(backup, dest)
+                os.chmod(dest, 0o755)
+                print(f"已移除钩子 {dest}，并恢复备份的原始 {args.hook_name}")
+            else:
+                print(f"已移除钩子 {dest}")
     else:
         print(f"未找到钩子 {dest}（无需移除）")
+    # 清掉本工具的钩子配置残留
+    cfg_path = os.path.join(root, ".pr-check.hook")
+    if os.path.isfile(cfg_path):
+        os.remove(cfg_path)
+        print(f"已移除钩子配置 {cfg_path}")
     return EXIT_OK
 
 
@@ -438,7 +759,35 @@ def cmd_hook(args: argparse.Namespace) -> int:
     raise ValidationError(f"未知 hook 动作：{action}")
 
 
+_DEBUG_VALUES = {"1", "true", "yes", "on"}
+
+
+def _setup_debug_logging() -> None:
+    """PR_CHECK_DEBUG=1（true/yes/on 亦可）：把 pr_check logger 打开到 DEBUG 并输出到 stderr。
+
+    用于排查降级原因（KB 失败跳过、stale 过滤跳过）、适配器异常类型与调用细节；
+    不影响 stdout 的结构化输出（错误信封与报告仍按契约走 stdout/--error-stream）。
+    """
+    if os.getenv("PR_CHECK_DEBUG", "").strip().lower() not in _DEBUG_VALUES:
+        return
+    import logging
+
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+    logger = logging.getLogger("pr_check")
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    logger.debug("PR_CHECK_DEBUG 已开启：调试日志输出到 stderr")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _setup_debug_logging()
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == "__complete":
+        # shell 补全内部命令：先于 argparse 直通。两个原因：REMAINDER 吞不掉以
+        # - 开头的补全词（bpo-13922）；且不注册进 parser 树，--help 天然不可见。
+        return _complete_words(list(argv[1:]))
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -449,6 +798,7 @@ def main(argv: list[str] | None = None) -> int:
             "kb": cmd_kb,
             "hook": cmd_hook,
             "config": cmd_config,
+            "completions": cmd_completions,
         }[args.command]
         return handler(args)
     except AppError as exc:

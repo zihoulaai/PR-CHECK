@@ -29,7 +29,7 @@ def _user_dir(kind: str) -> Path:
         fallback = home / "AppData" / ("Roaming" if kind == "config" else "Local")
     else:
         env_key = "XDG_CONFIG_HOME" if kind == "config" else "XDG_STATE_HOME"
-        fallback = home / (".config" if kind == "config" else ".local" / "state")
+        fallback = home / ".config" if kind == "config" else home / ".local" / "state"
     base = os.environ.get(env_key)
     return (Path(base) if base else fallback) / "pr-check"
 
@@ -38,6 +38,50 @@ USER_CONFIG_DIR = _user_dir("config")
 USER_STATE_DIR = _user_dir("state")
 USER_ENV_FILE = USER_CONFIG_DIR / ".env"
 LEGACY_CWD_DB = Path("pr_check.db")
+
+# `pr-check config init` 的 .env 模板。装机形态（wheel）不随包附带仓库根的
+# `.env.example`，模板必须内嵌于代码；tests/test_config_paths.py 有同步断言，
+# 改动 `.env.example` 时必须同步此处，防止两份漂移。
+ENV_TEMPLATE = """\
+# ===== 应用基础 =====
+APP_ENV=dev
+# SQLite 数据库路径（存 KB 文档元数据）
+# 留空（注释掉）则默认落到用户状态目录：
+#   Windows: %LOCALAPPDATA%\\pr-check\\pr_check.db
+#   Linux/macOS: $XDG_STATE_HOME/pr-check/pr_check.db（默认 ~/.local/state/pr-check/...）
+# 这样装机形态下换目录执行也共用同一份 KB 元数据；想随仓库走再显式写相对/绝对路径。
+# DATABASE_URL=sqlite:///./pr_check.db
+
+# ===== LLM（OpenAI 兼容端点） =====
+LLM_BASE_URL=
+LLM_MODEL=
+LLM_API_KEY=
+# 单次请求超时（秒），默认 120
+LLM_TIMEOUT_SECONDS=120
+LLM_MAX_RETRIES=1
+# 推理模型是否输出思维链：留空=不发送该字段（兼容不支持的端点）；
+# false=关闭（硅基流动 Qwen3.5 实测 41s/2179 tokens → 1.1s/32 tokens）
+LLM_ENABLE_THINKING=
+
+# ===== 知识库（向量检索服务） =====
+# KB_PROVIDER：maas（默认，MaaS Vector KB）/ openai（通用 OpenAI 风格向量检索）
+# / dify（Dify 知识库，KB_INDEX 承载 dataset_id）
+KB_PROVIDER=maas
+KB_BASE_URL=
+KB_API_KEY=
+KB_INDEX=
+
+# ===== 可配置阈值（可选，留空用默认值） =====
+SMALL_MAX_FILES=20
+SMALL_MAX_LINES=800
+MEDIUM_MAX_FILES=80
+MEDIUM_MAX_LINES=3000
+KB_TOP_K=5
+
+# ===== 调试（shell 环境变量，不写入本文件由 Settings 读取） =====
+# PR_CHECK_DEBUG=1（true/yes/on 亦可）：pr_check logger 输出 DEBUG 日志到 stderr，
+# 用于排查降级原因（KB 失败、stale 过滤跳过）与适配器异常类型；不影响 stdout 结构化输出。
+"""
 
 
 class Settings(BaseSettings):
@@ -78,7 +122,7 @@ class Settings(BaseSettings):
     kb_base_url: str | None = None
     kb_api_key: str | None = None
     kb_index: str | None = None
-    # 知识库供应商：maas（默认，向后兼容）/ openai（通用 OpenAI 风格向量检索）
+    # 知识库供应商：maas（默认，向后兼容）/ openai（通用 OpenAI 风格向量检索）/ dify
     kb_provider: str = "maas"
 
     # 阈值（D7）

@@ -134,3 +134,16 @@ class DifyKBAdapter:
         if not doc_id:
             raise KbError("Dify 未返回 document.id。")
         return doc_id
+
+    def delete(self, doc_id: str) -> None:
+        """删除 Dify 数据集内文档：``DELETE /v1/datasets/{dataset_id}/documents/{document_id}``。
+
+        upload 返回的就是 Dify document.id，元数据里的 id 与之同源，可直接删除。
+        """
+        try:
+            with self._client() as c:
+                resp = c.delete(self._ds_path(f"documents/{doc_id}"))
+                if resp.status_code >= 400:
+                    raise KbError(f"Dify 文档删除失败：HTTP {resp.status_code}")
+        except httpx.HTTPError as exc:
+            raise KbError(f"知识库文档删除失败：{exc}") from exc

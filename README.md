@@ -12,7 +12,7 @@
 
 ## 安装与运行
 
-统一使用 [uv](https://docs.astral.sh/uv/) 管理环境与命令（本机已装：`C:\Users\Theo\.local\bin\uv.exe`）。按用途三选一：
+统一使用 [uv](https://docs.astral.sh/uv/) 管理环境与命令（安装指引见官网）。按用途三选一：
 
 ### A. 日常使用：装成全局命令（推荐）
 
@@ -47,7 +47,8 @@ uv run pytest -q
 配置初始化（LLM / KB 均可选，不配也能跑基础自检）：
 
 ```bash
-cp .env.example .env             # 填写 LLM / KB 凭据
+pr-check config init             # 从内嵌模板生成用户级 .env（装机形态推荐）
+cp .env.example .env             # 源码形态替代写法；填写 LLM / KB 凭据
 ```
 
 > `.env` 按「包目录 → 当前目录」顺序读取，后者优先：装机形态（A/B）下把 `.env` 放到执行命令的工作目录，或直接导出环境变量。
@@ -85,9 +86,10 @@ pr-check check --repo . --base main --project team/order
 |---|---|
 | `check` | 对 diff 或本地仓库执行**完整**自检 |
 | `hook` | 管理 git 钩子（pre-push 拦截），配合 `--fail-on` 闸门 |
-| `kb` | 管理知识库文档（`upload` / `list`） |
+| `kb` | 管理知识库文档（`upload` / `list` / `import` / `delete`） |
 | `version` | 版本信息 |
-| `config` | 显示生效配置来源、SQLite 路径与 LLM/KB 配置状态（`pr-check config show`） |
+| `config` | `init` 生成 `.env`；`show` 显示生效配置来源、SQLite 路径与 LLM/KB 配置状态 |
+| `completions` | 打印 shell 补全脚本（`bash` / `zsh` / `fish`），候选由 parser 树实时生成 |
 
 全局选项：`--error-stream {stdout,stderr}`（错误信封输出流，默认 stdout）、`--input FILE`（`-` 表管道，兼容 `--diff`）。完整参数见 `docs/USAGE.md §5`。
 
@@ -106,7 +108,7 @@ pr-check check --repo . --base main --project team/order
 
 ### 提交拦截（git pre-push 钩子）
 
-工具本身「只出报告、不拦截」——即便报告有 HIGH 风险，`check` 仍返回退出码 0。要推送时自动拦截，需配合 git hook 与 `--fail-on` 闸门（`--fail-on` 命中返回专用退出码 7 `GATE_FAILED`）：
+工具本身「只出报告、不拦截」——即便报告有 HIGH 风险，`check` 仍返回退出码 0。要推送时自动拦截，需配合 git hook 与 `--fail-on` 闸门（`--fail-on` 命中返回专用退出码 7 `GATE_FAILED`）。钩子**仅**在闸门命中时阻断推送；Git/LLM/KB/内部错误（退出码 2/4/5/6/99）只告警放行——自检工具自身故障不应锁死推送；`PR_CHECK_STRICT=1` 可收紧为「失败也阻断」。
 
 ```bash
 # 安装 pre-push 钩子（需在目标 git 仓库目录下执行）
@@ -121,6 +123,16 @@ pr-check hook uninstall
 规则格式 `section:value`（可重复）：`risk:high` / `rule:violation` / `doc:confirm` / `debt:direct_match` 等。详见 `docs/USAGE.md §12`。
 
 > **证据门槛**：`risk:*` 只在风险项证据等级为 `A`/`B`（有可溯源知识库来源）时拦截；`C` 级（仅凭 Diff/经验推断）与 `N` 级（无法判断）不阻断——凭推断硬拦推送只会训练使用者 `--no-verify`。因此未配置知识库时 `risk:*` 实际不会触发。
+
+### CI 异步模式（`--ci`）
+
+CI 上与本地钩子相反：不阻塞流水线、结果贴回 MR、报告留 artifact。`check --ci` 默认非阻断（未显式 `--fail-on` 时有风险也返回 0），把 Markdown/JSON 报告写入 `--output`（默认 `pr-check-report.md` / `.json`），stdout 输出 MR 评论 payload（`note_body` 可直接 POST 到 notes API）：
+
+```bash
+pr-check check --repo . --base origin/main --project team/order --ci
+```
+
+GitLab CI 完整示例（贴评论 + artifact）见 `docs/USAGE.md §13`。
 
 ---
 
@@ -161,10 +173,10 @@ pr-check kb list --project team/order
 |---|---|---|
 | 1 摘要 | `summary` | 一句话总览本次变更与自检结论 |
 | 2 文档核查 | `doc_check[]` | API/接口文档与实现是否一致 |
-| 3 风险提示 | `risk[]` | 工程风险 |
+| 3 风险提示 | `risk[]` | 工程风险（`location` 可选：文件:行号定位） |
 | 4 项目规范 | `project_rules[]` | 命中项目规范 |
 | 5 技术债务 | `tech_debt[]` | 关联历史技术债务 |
-| 6 人工清单 | `manual_checklist[]` | 需人工确认的事项 |
+| 6 人工清单 | `manual_checklist[]` | 需人工确认的事项（与变更画像联动：基础项保底 + 专项项按变更主题追加） |
 | 7 知识来源 | `kb_sources[]` | 本次引用的知识文档 |
 
 **Evidence 等级强制规则**：`A`/`B` 必须 `source_refs` 非空**且每个 id 都真实命中本次知识库检索**（未命中的引用会被剔除，伪造引用的强结论降级为 `C`）；`C` 仅作弱化表述；`N` 必须明确「无法判断」。无知识命中时 `project_rules` / `tech_debt` 为空数组（对应「无知识不强判」）。`--format md` 即 7 段的 Markdown 渲染。
@@ -177,13 +189,16 @@ pr-check kb list --project team/order
 |---|---|---|
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI 兼容端点（MaaS / Azure / 本地 vLLM） | 否（未配则报告无 LLM 段落，仍返回基础风险） |
 | `LLM_MAX_RETRIES` | 总尝试次数（含首次），默认 1 = 不重试；仅对 429/408/5xx 与网络异常生效 | 否 |
+| `LLM_TIMEOUT_SECONDS` | 单次 LLM 请求超时（秒），默认 120 | 否 |
+| `LLM_ENABLE_THINKING` | 推理模型思维链输出：留空 = 不发送该字段；`false` 可显著降低延迟与 token | 否 |
 | `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | 向量知识库（项目知识库）；端点/鉴权结构由 `KB_PROVIDER` 决定 | 否 |
-| `KB_PROVIDER` | 知识库供应商：`maas`（默认）/ `openai`（通用 OpenAI 风格检索） | 否（默认 `maas`） |
+| `KB_PROVIDER` | 知识库供应商：`maas`（默认）/ `openai`（通用 OpenAI 风格检索）/ `dify`（Dify 知识库，`KB_INDEX` 承载 dataset_id） | 否（默认 `maas`） |
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K | 否 |
 | `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata，默认 `%LOCALAPPDATA%\pr-check\pr_check.db` / `$XDG_STATE_HOME/pr-check/pr_check.db`） | 否 |
 | `APP_ENV` | 运行环境（默认 `dev`） | 否 |
+| `PR_CHECK_DEBUG` | `1` / `true` / `yes` / `on` 开启调试日志（KB 降级原因、适配器异常类型等输出到 stderr） | 否 |
 
 ---
 
@@ -191,7 +206,8 @@ pr-check kb list --project team/order
 
 ```bash
 uv run pytest -q                        # 单测（parser/evidence/kb_query/workflow/cli/kb/local-git）
-uv run python tests/eval_harness.py     # 离线评估指标
+uv run python tests/eval_harness.py     # 离线评估指标（Fake 模式，可复现）
+uv run python tests/eval_harness.py --real   # 真实 LLM 回归集（需配 LLM_* 三件套）
 ```
 
 **配置来源（优先级从高到低）**：当前目录 `.env` → 用户级 `%APPDATA%\pr-check\.env`（Linux/macOS 为 `$XDG_CONFIG_HOME/pr-check/.env`）→ 包/源码目录 `.env`。装机形态推荐把凭据放到用户级，避免每个仓库复制一份。
@@ -200,6 +216,7 @@ uv run python tests/eval_harness.py     # 离线评估指标
 
 ```bash
 pr-check config show     # 输出 config_files / database_path / llm_configured / kb_configured
+pr-check config init     # 从内嵌模板生成用户级 .env（可用 --path 指定位置、--force 覆盖）
 ```
 
 ---

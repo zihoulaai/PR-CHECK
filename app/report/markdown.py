@@ -58,6 +58,17 @@ def _refs(refs: list[str]) -> str:
     return " ".join(f"[{r}]" for r in refs)
 
 
+def _cell(text: object) -> str:
+    """表格单元格消毒：防 LLM 自由文本破坏 Markdown 表格结构。
+
+    - ``|`` 转义为 ``\\|``（否则被当成列分隔符，整行列数错位）；
+    - 换行 / 回车压成空格（否则一行截断成多行，表格撕裂）。
+    """
+    s = "" if text is None else str(text)
+    return (s.replace("|", "\\|")
+             .replace("\r\n", " ").replace("\r", " ").replace("\n", " "))
+
+
 def _section_doc_check(report: CheckReport) -> str:
     if not report.doc_check:
         return "本次未发现明显的文档同步需求，或知识库未提供相关规范。"
@@ -65,8 +76,8 @@ def _section_doc_check(report: CheckReport) -> str:
             "|---|---|---|---|---|---|"]
     for it in report.doc_check:
         rows.append("| {item} | {verdict} | {basis} | {advice} | {ev} | {refs} |".format(
-            item=it.item, verdict=_DOC_VERDICT.get(it.verdict, it.verdict.value),
-            basis=it.basis or "—", advice=it.advice or "—",
+            item=_cell(it.item), verdict=_DOC_VERDICT.get(it.verdict, it.verdict.value),
+            basis=_cell(it.basis) or "—", advice=_cell(it.advice) or "—",
             ev=_EVIDENCE_BADGE.get(it.evidence_level, str(it.evidence_level)),
             refs=_refs(it.source_refs),
         ))
@@ -84,7 +95,10 @@ def _section_risk(report: CheckReport) -> str:
             continue
         out.append(f"### {_RISK_LABEL.get(lvl, lvl.value)}")
         for r in items:
-            out.append(f"- {r.text}  {_EVIDENCE_BADGE.get(r.evidence_level, '')}  {_refs(r.source_refs)}")
+            # location 为「文件:行号」定位指针：有则以行内代码展示，无则省略；
+            # 反引号消毒避免破坏 Markdown 行内代码
+            loc = f" `{r.location.replace('`', chr(39))}`" if r.location else ""
+            out.append(f"-{loc} {r.text}  {_EVIDENCE_BADGE.get(r.evidence_level, '')}  {_refs(r.source_refs)}")
     return "\n".join(out)
 
 
@@ -94,7 +108,7 @@ def _section_rules(report: CheckReport) -> str:
     rows = ["| 检查项 | 结论 | 证据 | 来源 |", "|---|---|---|---|"]
     for it in report.project_rules:
         rows.append("| {item} | {verdict} | {ev} | {refs} |".format(
-            item=it.item, verdict=_RULE_VERDICT.get(it.verdict, it.verdict.value),
+            item=_cell(it.item), verdict=_RULE_VERDICT.get(it.verdict, it.verdict.value),
             ev=_EVIDENCE_BADGE.get(it.evidence_level, ""), refs=_refs(it.source_refs),
         ))
     return "\n".join(rows)
@@ -106,7 +120,7 @@ def _section_debt(report: CheckReport) -> str:
     rows = ["| 检查项 | 结论 | 证据 | 来源 |", "|---|---|---|---|"]
     for it in report.tech_debt:
         rows.append("| {item} | {verdict} | {ev} | {refs} |".format(
-            item=it.item, verdict=_DEBT_VERDICT.get(it.verdict, it.verdict.value),
+            item=_cell(it.item), verdict=_DEBT_VERDICT.get(it.verdict, it.verdict.value),
             ev=_EVIDENCE_BADGE.get(it.evidence_level, ""), refs=_refs(it.source_refs),
         ))
     return "\n".join(rows)

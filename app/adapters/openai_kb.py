@@ -94,3 +94,15 @@ class OpenAIStyleKBAdapter:
         except ValueError as exc:
             raise KbError(f"知识库返回了非 JSON 响应：{exc}") from exc
         return doc_id
+
+    def delete(self, doc_id: str) -> None:
+        try:
+            with self._client() as c:
+                resp = c.post(
+                    "/v1/delete",
+                    json={"id": doc_id, "index": self.index},
+                )
+                if resp.status_code >= 400:
+                    raise KbError("知识库文档删除失败。")
+        except httpx.HTTPError as exc:
+            raise KbError(f"知识库文档删除失败：{exc}") from exc

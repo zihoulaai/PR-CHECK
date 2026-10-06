@@ -17,6 +17,7 @@ from app.adapters.base import (
 )
 from app.domain.enums import Platform
 from app.domain.schemas import KBHit, KBQuery, MRRef, PRMetadata, ProjectRef
+from app.errors import KbError
 
 DEFAULT_SAMPLE_DIFF = """diff --git a/src/refund/RefundController.java b/src/refund/RefundController.java
 new file mode 100644
@@ -144,3 +145,9 @@ class FakeKB:
             score=1.0,
         ))
         return doc_id
+
+    def delete(self, doc_id: str) -> None:
+        before = len(self._docs)
+        self._docs = [d for d in self._docs if d.id != doc_id]
+        if len(self._docs) == before:
+            raise KbError(f"FakeKB 中不存在文档 {doc_id}。")

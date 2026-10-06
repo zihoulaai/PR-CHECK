@@ -1,7 +1,21 @@
 #!/bin/sh
+# PRCHECK_MANAGED_HOOK=1
 # PR_CHECK pre-push 钩子：推送前对本地分支做自检，命中 --fail-on 闸门则中断推送。
 # 由 `pr-check hook install` 安装到 .git/hooks/pre-push，并读取仓库根目录的 .pr-check.hook 配置。
 # 本文件作为包内资源随 wheel 分发（app/hooks/pre-push）。
+#
+# 阻断语义：仅闸门命中（check 退出码 7 GATE_FAILED）阻断推送；
+# Git / LLM / KB / 内部错误（2/4/5/6/99）只告警放行——自检工具自身故障不应锁死推送，
+# 否则只会训练使用者 --no-verify。PR_CHECK_STRICT=1 可收紧为「失败也阻断」。
+#
+# stdin 引用过滤：git 向 pre-push 经 stdin 逐行传入 <local ref> <local sha>
+# <remote ref> <remote sha>。删除分支（local sha 全 0）与标签推送（remote ref 为
+# refs/tags/）没有「相对 base 的新增提交」可检，读取后跳过自检；只要含一条真实
+# 分支推送照常在检。
+#
+# 输出中的变量一律写 ${VAR} 花括号形式：bash 在多字节 locale（zh_CN.UTF-8 / en_US.UTF-8 等）
+# 下，"$VAR" 后紧跟全角字符时会吞掉变量值与该字符首字节（bash 3.2 实测复现，dash/zsh 无此问题），
+# 花括号可绕开。新增/修改 echo 行时请保持这一写法。
 set -e
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -9,6 +23,30 @@ HOOK_CFG="$ROOT/.pr-check.hook"
 if [ -f "$HOOK_CFG" ]; then
     # shellcheck disable=SC1090
     . "$HOOK_CFG"
+fi
+
+# 交互式直跑（stdin 是终端）时没有引用可读，读会阻塞，直接跳过
+if [ -t 0 ]; then
+    echo "PR_CHECK: stdin 为终端（未提供推送引用），跳过本次自检。" >&2
+    exit 0
+fi
+
+CHECK=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${local_ref}" ] || continue
+    case "${remote_ref}" in
+        refs/tags/*) continue ;;  # 标签推送：不构成相对 base 的新增提交
+    esac
+    # local sha 去掉所有 0 后为空 = 删除远端分支（git push origin :branch），无可检提交
+    if [ -z "$(printf '%s' "${local_sha}" | tr -d 0)" ]; then
+        continue
+    fi
+    CHECK=1
+    break
+done
+if [ "${CHECK}" -eq 0 ]; then
+    echo "PR_CHECK: 本次推送仅含删除分支 / 标签，无新增提交可检，跳过自检。" >&2
+    exit 0
 fi
 
 PROJECT="${PR_CHECK_PROJECT:?请在 .pr-check.hook 设置 PR_CHECK_PROJECT（知识库项目）}"
@@ -21,7 +59,7 @@ MODULE="${PR_CHECK_MODULE:-app.cli}"
 # 工具不可用时只告警放行：自检缺失不构成推送阻断（Redis/PATH/解释器被卸载的情况），
 # 强拦只会训练使用者 --no-verify。
 if ! command -v "$PYTHON" >/dev/null 2>&1; then
-    echo "PR_CHECK: 未找到解释器 $PYTHON，跳过本次自检。" >&2
+    echo "PR_CHECK: 未找到解释器 ${PYTHON}，跳过本次自检。" >&2
     echo "PR_CHECK: 恢复自检：在本仓库重跑 pr-check hook install。" >&2
     exit 0
 fi
@@ -33,7 +71,7 @@ if [ -n "$CLI" ] && [ -f "$CLI" ]; then
 elif "$PYTHON" -c "import $MODULE" >/dev/null 2>&1; then
     set -- -m "$MODULE"
 else
-    echo "PR_CHECK: 当前解释器无法导入 $MODULE（工具已被卸载或环境已变更），跳过本次自检。" >&2
+    echo "PR_CHECK: 当前解释器无法导入 ${MODULE}（工具已被卸载或环境已变更），跳过本次自检。" >&2
     echo "PR_CHECK: 恢复自检：在本仓库重跑 pr-check hook install。" >&2
     exit 0
 fi
@@ -53,13 +91,29 @@ for spec in $FAIL_ON; do
     FAIL_ARGS="$FAIL_ARGS --fail-on $spec"
 done
 
+# 起检提示：LLM 分析最长可达 LLM_TIMEOUT_SECONDS（默认 120s），避免看似卡死
+echo "PR_CHECK: 正在自检 ${BASE_REF}...HEAD 的变更（项目：${PROJECT}）..." >&2
+
 set +e
+# Markdown 输出：push 是给人看的时刻，人类优先；报告仍同时写入 stdout 便于复制
 "$PYTHON" "$@" check --repo "$ROOT" --base "$BASE_REF" \
-    --project "$PROJECT" --format json $FAIL_ARGS
+    --project "$PROJECT" --format md $FAIL_ARGS
 RC=$?
 set -e
 
-if [ "$RC" -ne 0 ]; then
-    echo "pre-push 被 PR_CHECK 拦截（退出码 $RC）。如需跳过可用 'git push --no-verify'（不推荐）。" >&2
+# 退出码 7 = GATE_FAILED：报告已正常生成，被人为规则拦下，必须阻断
+if [ "$RC" -eq 7 ]; then
+    echo "pre-push 被 PR_CHECK 拦截（命中 --fail-on 闸门，退出码 7）。如需跳过可用 'git push --no-verify'（不推荐）。" >&2
     exit 1
 fi
+# 其余非零（2/4/5/6/99：参数/Git/LLM/KB/内部错误）是自检工具自身故障：
+# 告警放行，与上面「工具缺失不阻断」保持同一立场
+if [ "$RC" -ne 0 ]; then
+    echo "PR_CHECK: 自检执行失败（退出码 ${RC}），本次不阻断推送。" >&2
+    echo "PR_CHECK: 请稍后重试，或手动运行 pr-check check --repo . 排查；工具的详细报错见上方输出。" >&2
+    if [ "${PR_CHECK_STRICT:-0}" = "1" ]; then
+        echo "PR_CHECK: 已设置 PR_CHECK_STRICT=1，自检失败同样阻断推送。" >&2
+        exit 1
+    fi
+fi
+exit 0

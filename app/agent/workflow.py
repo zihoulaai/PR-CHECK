@@ -17,7 +17,8 @@ from app.agent.evidence import sanitize_report
 from app.agent.kb_query import build_kb_query
 from app.agent.prompt import build_system_prompt, build_user_prompt
 from app.container import get_container, select_git_adapter
-from app.domain.enums import AnalysisMode, EvidenceLevel, KbStatus, RiskLevel
+from app.domain.enums import (AnalysisMode, ChangeType, EvidenceLevel,
+                              HighImpactFeature, KbStatus, RiskLevel)
 from app.domain.schemas import (
     CheckReport, KbSource, MRRef, PRMetadata, ReportMeta, ReportSections, RiskItem,
 )
@@ -126,7 +127,25 @@ def _search_kb(container, pr: PRMetadata, profile, mode: AnalysisMode):
     except Exception as exc:  # noqa: BLE001 - 降级契约优先于异常类型
         logger.error("kb_search_unexpected type=%s", type(exc).__name__)
         return [], KbStatus.FAILED
+    hits = _drop_stale(hits, pr.project)
     return hits, (KbStatus.SUCCESS if hits else KbStatus.EMPTY)
+
+
+def _drop_stale(hits, project: str):
+    """剔除本地 metadata 中已标记 stale（过期）的来源（kb import --prune 的产物）。
+
+    DB 查询异常时不过滤：检索结果优先于元数据，不能因本地库问题丢掉有效知识。
+    """
+    if not hits:
+        return hits
+    try:
+        from app.storage.repo import list_stale_doc_ids
+
+        stale = list_stale_doc_ids(project)
+    except Exception as exc:  # noqa: BLE001 - 元数据不可用时放行检索结果
+        logger.warning("kb_stale_filter_skipped type=%s", type(exc).__name__)
+        return hits
+    return [h for h in hits if h.id not in stale]
 
 
 def _parse_sections(raw: str) -> ReportSections:
@@ -187,7 +206,7 @@ def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status) -
         doc_check=list(sections.doc_check), risk=list(sections.risk),
         project_rules=[] if no_kb else list(sections.project_rules),
         tech_debt=[] if no_kb else list(sections.tech_debt),
-        manual_checklist=list(sections.manual_checklist) or _default_checklist(),
+        manual_checklist=list(sections.manual_checklist) or build_checklist(profile),
         kb_sources=kb_sources,
     )
 
@@ -215,7 +234,7 @@ def _build_summary_only(pr, profile, kb_status, *, mode: AnalysisMode | None = N
         meta=_meta(pr, profile, mode or AnalysisMode.SUMMARY_ONLY, kb_status),
         summary=_summary_from_profile(pr, profile, degraded_no_llm=degraded_no_llm),
         doc_check=[], risk=risks, project_rules=[], tech_debt=[],
-        manual_checklist=_default_checklist(),
+        manual_checklist=build_checklist(profile),
         kb_sources=[],
     )
 
@@ -249,8 +268,66 @@ def _meta(pr, profile, mode, kb_status) -> ReportMeta:
     )
 
 
-def _default_checklist() -> list[str]:
-    return [
-        "API 兼容性", "测试覆盖", "异常和边界条件", "数据库迁移",
-        "配置同步", "日志敏感信息", "文档同步",
-    ]
+# checklist 基础项：任何 PR 都应人工过目（与变更画像无关，保证清单非空）
+_BASE_CHECKLIST = [
+    "测试覆盖", "异常和边界条件", "文档同步",
+]
+
+# 变更画像触发器 → 专项人工检查项（P2-10）。
+# 同一主题的 ChangeType 与 HighImpactFeature 指向相同文本（如 DATABASE_CHANGE 与
+# DATABASE），追加时按文本去重：任一侧命中即出一项，不会重复。未登记的触发器
+# （COMMENT_CHANGE / TEST_CHANGE 等无风险主题）不产生专项项，靠基础项保底。
+_CHECKLIST_BY_TRIGGER: dict = {
+    # 接口契约
+    ChangeType.API_CHANGE: "API 兼容性（调用方是否需要同步改造、契约是否版本化）",
+    HighImpactFeature.PUBLIC_API: "API 兼容性（调用方是否需要同步改造、契约是否版本化）",
+    # 数据与存储
+    ChangeType.DATA_MODEL_CHANGE: "数据模型变更兼容性（历史数据与回滚）",
+    ChangeType.DATABASE_CHANGE: "数据库迁移与回滚脚本（索引、锁、数据量评估）",
+    HighImpactFeature.DATABASE: "数据库迁移与回滚脚本（索引、锁、数据量评估）",
+    # 配置与依赖
+    ChangeType.CONFIG_CHANGE: "配置同步（各环境默认值是否一致）",
+    HighImpactFeature.CONFIGURATION: "配置同步（各环境默认值是否一致）",
+    ChangeType.DEPENDENCY_CHANGE: "依赖变更影响面（版本锁定、降级与超时策略）",
+    HighImpactFeature.EXTERNAL_DEPENDENCY: "依赖变更影响面（版本锁定、降级与超时策略）",
+    # 可观测性
+    ChangeType.LOGGING_CHANGE: "日志可观测性（敏感字段脱敏、关键路径有迹）",
+    HighImpactFeature.LOGGING: "日志可观测性（敏感字段脱敏、关键路径有迹）",
+    # 运行时属性
+    ChangeType.TRANSACTION_CHANGE: "事务边界与异常回滚",
+    HighImpactFeature.TRANSACTION: "事务边界与异常回滚",
+    ChangeType.CACHE_CHANGE: "缓存一致性与失效策略",
+    HighImpactFeature.CACHE: "缓存一致性与失效策略",
+    ChangeType.AUTH_CHANGE: "权限与鉴权变更验证",
+    HighImpactFeature.PERMISSION: "权限与鉴权变更验证",
+    ChangeType.SERIALIZATION_CHANGE: "序列化向后兼容（新老格式混部）",
+    HighImpactFeature.SERIALIZATION: "序列化向后兼容（新老格式混部）",
+    HighImpactFeature.CONCURRENCY: "并发安全（竞态、死锁）",
+}
+
+# 文件操作 → 追加确认项（added/deleted/renamed 计数 > 0 时逐项追加）
+_CHECKLIST_BY_FILE_OP = [
+    ("added", "新增文件是否纳入构建/发布/忽略规则"),
+    ("deleted", "删除文件的影响面（残留引用是否清理干净）"),
+    ("renamed", "重命名可追溯性（git 是否识别为 rename、引用是否同步）"),
+]
+
+
+def build_checklist(profile) -> list[str]:
+    """按变更画像生成人工清单：基础项保底 + 画像触发的专项项 + 文件操作确认项。
+
+    - LLM 输出空 checklist 时（或 summary_only 无 LLM 时）的回落值；
+    - 专项项按映射表声明顺序输出（不随检测顺序漂移），同主题文本去重；
+    - 空画像退化为纯基础项，清单永不落空（渲染层依赖非空）。
+    """
+    triggers = set(profile.change_types) | set(profile.high_impact_features)
+    items = list(_BASE_CHECKLIST)
+    seen = set(items)
+    for trigger, text in _CHECKLIST_BY_TRIGGER.items():
+        if trigger in triggers and text not in seen:
+            seen.add(text)
+            items.append(text)
+    for attr, text in _CHECKLIST_BY_FILE_OP:
+        if getattr(profile, f"{attr}_files", 0):
+            items.append(text)
+    return items

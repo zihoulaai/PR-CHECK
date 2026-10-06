@@ -10,7 +10,7 @@ CLI       = $(PYTHON) -m app.cli
 .DEFAULT_GOAL := help
 
 .PHONY: help install install-dev test version \
-        check kb-upload kb-list eval \
+        check kb-upload kb-list eval eval-real \
         package clean
 
 help: ## 显示本帮助
@@ -22,15 +22,16 @@ help: ## 显示本帮助
 	@echo "  check            离线跑一段 diff（--fake）：make check DIFF=pr.diff"
 	@echo "  kb-upload        上传知识文档：make kb-upload FILE=api.md PROJECT=team/order DOC_TYPE=api_document [MODULE=pay]"
 	@echo "  kb-list          列出知识文档：make kb-list [PROJECT=team/order]"
-	@echo "  eval             运行离线评估指标"
+	@echo "  eval             运行离线评估指标（Fake 模式）"
+	@echo "  eval-real        真实 LLM 回归集（需配 LLM_* 环境变量）"
 	@echo "  package          构建 sdist + wheel 到 dist/（需 build 包）"
 	@echo "  clean            清理 __pycache__ 与 .pyc"
 
 install: ## 安装运行依赖
-	$(PIP) install -r requirements.txt
+	$(PIP) install .
 
 install-dev: ## 安装运行 + 开发（测试）依赖
-	$(PIP) install -r requirements.txt "pytest>=8.0" "pytest-asyncio>=0.23"
+	$(PIP) install -e ".[dev]"
 
 test: ## 运行全部单测
 	$(PYTHON) -m pytest -q
@@ -47,8 +48,11 @@ kb-upload: ## 上传知识文档：make kb-upload FILE=api.md PROJECT=team/order
 kb-list: ## 列出知识文档：make kb-list [PROJECT=team/order]
 	$(CLI) kb list $(if $(PROJECT),--project $(PROJECT),)
 
-eval: ## 运行离线评估指标
-	$(PYTHON) tests/eval_harness.py
+eval: ## 运行离线评估指标（Fake 模式，可复现；加 STRICT=1 则失败即报错）
+	$(PYTHON) tests/eval_harness.py $(if $(STRICT),--strict,)
+
+eval-real: ## 真实 LLM 回归集（需 .env 配齐 LLM_BASE_URL/LLM_MODEL/LLM_API_KEY）
+	$(PYTHON) tests/eval_harness.py --real --strict
 
 package: ## 构建 sdist + wheel 到 dist/（需可联网安装 build）
 	$(PIP) install --quiet --disable-pip-version-check build

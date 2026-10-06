@@ -1,6 +1,6 @@
 [project]
 name = "pr-check"
-version = "0.1.0"
+version = "1.0.0"
 description = "PR 提交前置自检 Agent MVP"
 readme = "README.md"
 requires-python = ">=3.11"

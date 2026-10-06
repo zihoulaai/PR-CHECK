@@ -167,6 +167,8 @@ class DocCheckItem(BaseModel):
 class RiskItem(BaseModel):
     level: RiskLevel
     text: str
+    # 文件:行号定位（可选）。LLM 参照 diff @@ hunk 头推断；填不出留空，不强校验。
+    location: str = ""
     evidence_level: EvidenceLevel
     source_refs: list[str] = Field(default_factory=list)
 
