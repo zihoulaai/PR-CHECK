@@ -15,7 +15,10 @@ from app.errors import KbError
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(kb_base_url="http://kb.local", kb_api_key="k")
+    # 显式固定 kb_provider：pydantic-settings 会从 .env / 环境变量读取该字段
+    #（例如本地 .env 的 KB_PROVIDER=dify），测试必须自包含、不依赖真实环境。
+    # 显式 init 参数优先级高于环境变量与 dotenv，其余用例可用 overrides 覆盖。
+    base = dict(kb_base_url="http://kb.local", kb_api_key="k", kb_provider="maas")
     base.update(overrides)
     return Settings(**base)
 
@@ -36,8 +39,10 @@ def test_provider_openai_routes_to_openai_adapter():
 
 
 def test_unknown_provider_raises_kb_error():
+    # dify 已在注册表登记（DifyKBAdapter），不再是「未知」供应商；
+    # 用未登记的名称验证「未知 provider 显式报错、不静默回落」的契约。
     with pytest.raises(KbError):
-        build_kb(_settings(kb_provider="dify"))
+        build_kb(_settings(kb_provider="nonexistent"))
 
 
 def test_top_k_injected_into_adapter():
