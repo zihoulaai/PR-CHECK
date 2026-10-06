@@ -120,8 +120,8 @@ def _search_kb(container, pr: PRMetadata, profile, mode: AnalysisMode):
         return [], KbStatus.NOT_CONFIGURED
     try:
         hits = container.kb.search(build_kb_query(pr, profile))
-    except KbError:
-        logger.error("kb_search_failed")
+    except KbError as exc:
+        logger.error("kb_search_failed: %s", exc)
         return [], KbStatus.FAILED
     except Exception as exc:  # noqa: BLE001 - 降级契约优先于异常类型
         logger.error("kb_search_unexpected type=%s", type(exc).__name__)

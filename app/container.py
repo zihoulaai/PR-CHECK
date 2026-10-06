@@ -51,7 +51,7 @@ def _build_default() -> Container:
         kb = FakeKB()
     else:
         from app.adapters.llm import LLMClientImpl
-        from app.adapters.maas_kb import MaaSVectorKBAdapter
+        from app.adapters.registry import build_kb
         from app.domain.schemas import ReportSections
 
         llm = LLMClientImpl(
@@ -61,9 +61,9 @@ def _build_default() -> Container:
             response_schema=ReportSections.model_json_schema(),
             enable_thinking=s.llm_enable_thinking,
         ) if s.llm_base_url else None
-        kb = MaaSVectorKBAdapter(
-            base_url=s.kb_base_url, api_key=s.kb_api_key, index=s.kb_index,
-        ) if s.kb_base_url else None
+        # KB 按 kb_provider 路由（未配置凭据返回 None → 降级基础自检；
+        # 未知 provider 抛 KbError，由 cli 顶层转退出码 6）
+        kb = build_kb(s)
 
     local = LocalGitAdapter()
 

@@ -40,10 +40,11 @@ cp .env.example .env          # 填写可选的 LLM/KB
 | 变量 | 说明 | 必填 |
 |---|---|---|
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI 兼容端点（如 MaaS / 硅基流动 / 本地 vLLM） | 否（未配则自检报告无 LLM 段落，仍返回基础风险） |
-| `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | MaaS Vector KB（项目知识库） | 否 |
+| `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | 向量知识库（项目知识库）；端点/鉴权结构由 `KB_PROVIDER` 决定 | 否 |
+| `KB_PROVIDER` | 知识库供应商：`maas`（默认，MaaS Vector KB）/ `openai`（通用 OpenAI 风格检索，自建 RAG 或兼容 OpenAI embeddings+search 的服务） | 否（默认 `maas`） |
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
-| `KB_TOP_K` | 知识检索 Top-K | 否 |
+| `KB_TOP_K` | 知识检索 Top-K（真正注入 adapter，不再硬编码） | 否（默认 5） |
 | `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata） | 否（默认用户状态目录，见下） |
 
 **配置来源**（优先级从高到低）：当前目录 `.env` → 用户级 `%APPDATA%\pr-check\.env`（Linux/macOS：`$XDG_CONFIG_HOME/pr-check/.env`）→ 包/源码目录 `.env`。
@@ -159,6 +160,22 @@ pr-check kb list --doc-type api_document
 
 `kb upload` 参数：`--file`（必填）、`--project`（必填）、`--doc-type`（必填，见 `DocType`）、`--module`、`--title`。
 `kb list` 参数：`--project` / `--module` / `--doc-type`（均可选过滤）。
+
+### 知识库供应商（可插拔）
+
+通过 `KB_PROVIDER` 选择底层向量库，业务层不感知差异；未配置凭据仍降级为基础自检：
+
+```bash
+# 默认 MaaS Vector KB（无需显式设置）
+KB_BASE_URL=https://maas.example.com/kb  KB_API_KEY=xxx  pr-check check --repo .
+
+# 通用 OpenAI 风格检索（自建 RAG / 兼容 OpenAI embeddings+search 的服务）
+KB_PROVIDER=openai  KB_BASE_URL=https://rag.example.com  KB_API_KEY=xxx \
+    pr-check check --repo .
+```
+
+> 新增供应商只需在 `app/adapters/registry.py` 的 `PROVIDERS` 登记一个实现
+> `KnowledgeBase`（search / upload）的类；未知 `KB_PROVIDER` 会显式报错（退出码 6），不静默回落，避免误配用错库。
 
 ---
 

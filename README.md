@@ -126,7 +126,7 @@ pr-check hook uninstall
 
 ## 知识库（KB）
 
-原 Web 上传改为 CLI 子命令，保留完整 KB 检索能力（按 `project` 强制过滤、跨项目拒绝）：
+原 Web 上传改为 CLI 子命令，保留完整 KB 检索能力（按 `project` 强制过滤、跨项目拒绝）。底层向量库通过 `KB_PROVIDER` 选择（`maas` 默认 / `openai` 通用 OpenAI 风格），新增供应商只需在 `app/adapters/registry.py` 登记实现 `KnowledgeBase` 的类：
 
 ```bash
 pr-check kb upload --file api.md --project team/order \
@@ -177,7 +177,8 @@ pr-check kb list --project team/order
 |---|---|---|
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | OpenAI 兼容端点（MaaS / Azure / 本地 vLLM） | 否（未配则报告无 LLM 段落，仍返回基础风险） |
 | `LLM_MAX_RETRIES` | 总尝试次数（含首次），默认 1 = 不重试；仅对 429/408/5xx 与网络异常生效 | 否 |
-| `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | MaaS Vector KB（项目知识库） | 否 |
+| `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | 向量知识库（项目知识库）；端点/鉴权结构由 `KB_PROVIDER` 决定 | 否 |
+| `KB_PROVIDER` | 知识库供应商：`maas`（默认）/ `openai`（通用 OpenAI 风格检索） | 否（默认 `maas`） |
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K | 否 |

@@ -1,7 +1,18 @@
-"""MaaSVectorKBAdapter：知识库可选增强（D5 / C3）。
+"""OpenAIStyleKBAdapter：通用 OpenAI 风格向量检索的示例实现（D5 / C3）。
 
-底层 Vector KB 对 Agent 透明；project 必填，服务端按 project 过滤（D13）。
-端点路径通过配置注入，不写死业务代码（C3）。
+覆盖「自建 RAG / 兼容 OpenAI embeddings+search 的服务」这类供应商：约定
+REST 检索端点 ``/v1/search``，鉴权沿用 ``Authorization: Bearer``。本实现作为
+可插拔框架的第二个示例，验证「新增供应商只需实现 ``KnowledgeBase`` 并在注册表
+登记」而无需改动业务层。
+
+字段契约（与 MaaS 的差异点，演示供应商可插拔）：
+- 检索请求体不含 ``focus``（通用检索服务不消费该语义字段），仅 ``index`` /
+  ``project`` / ``query`` / ``top_k``；
+- 端点路径为 ``/v1/search``（MaaS 为 ``/search``）。
+响应结构约定与 MaaS 一致（``{hits:[...]}``），复用 ``parse_hits`` 统一解析并
+按 ``project`` 双重过滤，保证 Evidence A/B 真实命中约束不被破坏。
+
+若实际服务端点 / 字段不同，改本文件的端点与 ``_parse`` 即可，不影响其它模块。
 """
 from __future__ import annotations
 
@@ -14,12 +25,8 @@ from app.adapters.query_text import build_query_text, parse_hits
 from app.domain.schemas import KBHit, KBQuery
 from app.errors import KbError
 
-# 向后兼容别名：旧单测仍从本模块 import 这两个符号
-_build_query_text = build_query_text
-_to_hits = parse_hits
 
-
-class MaaSVectorKBAdapter:
+class OpenAIStyleKBAdapter:
     def __init__(self, base_url: str, api_key: str, index: str | None = None,
                  top_k: int = 5, timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
@@ -42,13 +49,12 @@ class MaaSVectorKBAdapter:
         try:
             with self._client() as c:
                 resp = c.post(
-                    "/search",
+                    "/v1/search",
                     json={
                         "index": self.index,
                         "project": query.project,
                         "query": build_query_text(query),
                         "top_k": self.top_k,
-                        "focus": query.focus,
                     },
                 )
                 if resp.status_code >= 400:
@@ -60,7 +66,7 @@ class MaaSVectorKBAdapter:
             raise KbError(f"知识库返回了非 JSON 响应：{exc}") from exc
 
         try:
-            return _to_hits(data, query.project)
+            return parse_hits(data, query.project)
         except (TypeError, ValueError, KeyError, AttributeError) as exc:
             # 响应结构异常：同样降级为 KbError，交由 workflow 降级为基础自检
             raise KbError(f"知识库返回结构异常：{exc}") from exc
@@ -70,7 +76,7 @@ class MaaSVectorKBAdapter:
         try:
             with self._client() as c:
                 resp = c.post(
-                    "/upload",
+                    "/v1/upload",
                     json={
                         "id": doc_id,
                         "index": self.index,
@@ -88,11 +94,3 @@ class MaaSVectorKBAdapter:
         except ValueError as exc:
             raise KbError(f"知识库返回了非 JSON 响应：{exc}") from exc
         return doc_id
-
-
-def _to_hits(data, project: str) -> list[KBHit]:  # pragma: no cover - 兼容别名
-    return parse_hits(data, project)
-
-
-def _build_query_text(query: KBQuery) -> str:  # pragma: no cover - 兼容别名
-    return build_query_text(query)

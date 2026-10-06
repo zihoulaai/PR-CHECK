@@ -78,6 +78,8 @@ class Settings(BaseSettings):
     kb_base_url: str | None = None
     kb_api_key: str | None = None
     kb_index: str | None = None
+    # 知识库供应商：maas（默认，向后兼容）/ openai（通用 OpenAI 风格向量检索）
+    kb_provider: str = "maas"
 
     # 阈值（D7）
     small_max_files: int = 20
