@@ -44,6 +44,20 @@ cp .env.example .env          # 填写可选的 LLM/KB
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K | 否 |
+| `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata） | 否（默认用户状态目录，见下） |
+
+**配置来源**（优先级从高到低）：当前目录 `.env` → 用户级 `%APPDATA%\pr-check\.env`（Linux/macOS：`$XDG_CONFIG_HOME/pr-check/.env`）→ 包/源码目录 `.env`。
+
+装机形态（`uv tool install` / `uvx`）没有可读的项目根，**推荐把凭据放用户级**，避免每个仓库复制一份。
+`DATABASE_URL` 默认落在用户状态目录（Windows `%LOCALAPPDATA%\pr-check\pr_check.db`、Linux/macOS `$XDG_STATE_HOME/pr-check/pr_check.db`），
+换目录执行共用同一份 KB 元数据；旧版本默认 `sqlite:///./pr_check.db` 会随 cwd 漂移，如需保留旧行为显式写死即可。
+排查配置来源与生效路径：
+
+```bash
+pr-check config show
+# {"config_files": [...], "user_env_file": "...", "database_path": "...",
+#  "llm_configured": true, "kb_configured": false, ...}
+```
 
 **结构化输出**：优先 `response_format=json_schema` + `strict=true`（服务端按 `ReportSections` 的 JSON Schema 强制约束输出，Schema 中的 `$defs`/`$ref` 会自动内联展开并补全 `required`）。实测非 strict 时模型会省略 `doc_check` / `risk` 等整段，故默认 strict。降级链 `strict json_schema → json_schema → json_object`：仅当服务端以 400 且响应体指向 `response_format` 时降级一级，降级位置记入客户端实例，后续请求不再重复试探。无论哪种模式，输出仍会经 Pydantic 校验，不合契约即 `LLM_INVALID_OUTPUT`（退出码 5）。
 
@@ -68,6 +82,7 @@ cp .env.example .env          # 填写可选的 LLM/KB
 | `hook` | 管理 git 钩子（pre-push 拦截），配合 `--fail-on` 闸门 |
 | `kb` | 管理知识库文档（`upload` / `list`） |
 | `version` | 版本信息 |
+| `config` | 显示生效配置来源、SQLite 路径与 LLM/KB 配置状态（`show`，可省略） |
 
 全局选项：`--error-stream {stdout,stderr}`（错误信封输出流，默认 stdout）、`--input FILE`（`-` 表管道，兼容 `--diff`）。
 

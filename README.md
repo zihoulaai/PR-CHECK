@@ -87,6 +87,7 @@ pr-check check --repo . --base main --project team/order
 | `hook` | 管理 git 钩子（pre-push 拦截），配合 `--fail-on` 闸门 |
 | `kb` | 管理知识库文档（`upload` / `list`） |
 | `version` | 版本信息 |
+| `config` | 显示生效配置来源、SQLite 路径与 LLM/KB 配置状态（`pr-check config show`） |
 
 全局选项：`--error-stream {stdout,stderr}`（错误信封输出流，默认 stdout）、`--input FILE`（`-` 表管道，兼容 `--diff`）。完整参数见 `docs/USAGE.md §5`。
 
@@ -180,7 +181,7 @@ pr-check kb list --project team/order
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K | 否 |
-| `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata，默认 `sqlite:///./pr_check.db`） | 否 |
+| `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata，默认 `%LOCALAPPDATA%\pr-check\pr_check.db` / `$XDG_STATE_HOME/pr-check/pr_check.db`） | 否 |
 | `APP_ENV` | 运行环境（默认 `dev`） | 否 |
 
 ---
@@ -192,7 +193,13 @@ uv run pytest -q                        # 单测（parser/evidence/kb_query/work
 uv run python tests/eval_harness.py     # 离线评估指标
 ```
 
-> `DATABASE_URL` 默认 `sqlite:///./pr_check.db`，相对**当前目录**：装机形态下换目录执行会各建一份库，`kb list` 看不到别处的文档。想共用一份就显式指定绝对路径（`DATABASE_URL=sqlite:///%LOCALAPPDATA%/pr-check/pr_check.db`）。
+**配置来源（优先级从高到低）**：当前目录 `.env` → 用户级 `%APPDATA%\pr-check\.env`（Linux/macOS 为 `$XDG_CONFIG_HOME/pr-check/.env`）→ 包/源码目录 `.env`。装机形态推荐把凭据放到用户级，避免每个仓库复制一份。
+
+`DATABASE_URL` 默认落在用户状态目录，装机形态换目录执行共用同一份 KB 元数据；旧版本默认 `sqlite:///./pr_check.db`（随 cwd 漂移），升级后若还想随仓库走，显式设置即可。排查用：
+
+```bash
+pr-check config show     # 输出 config_files / database_path / llm_configured / kb_configured
+```
 
 ---
 

@@ -193,6 +193,38 @@ def cmd_version(_args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_config(args: argparse.Namespace) -> int:
+    """输出配置来源与数据落点，用于排查「凭据到底读的哪份 .env」「kb list 为什么是空的」。"""
+    from app.config import (
+        LEGACY_CWD_DB,
+        USER_ENV_FILE,
+        active_config_files,
+        database_path,
+        get_settings,
+        is_kb_configured,
+        is_llm_configured,
+    )
+
+    s = get_settings()
+    files = active_config_files()
+    payload = {
+        "config_files": files,                     # 按优先级升序，最后一个优先级最高
+        "user_env_file": str(USER_ENV_FILE),
+        "database_path": database_path(s),
+        "app_env": s.app_env,
+        "llm_configured": is_llm_configured(s),
+        "kb_configured": is_kb_configured(s),
+    }
+    # 旧版默认把库建在 cwd：换了默认路径后老数据不会自动跟过来，这里提示一下。
+    if LEGACY_CWD_DB.is_file() and Path(LEGACY_CWD_DB).resolve() != Path(database_path(s)).resolve():
+        payload["legacy_db_hint"] = (
+            f"检测到当前目录遗留 {LEGACY_CWD_DB}：默认数据已迁到用户状态目录，"
+            f"如需沿用旧数据请执行 move/copy 后设置 DATABASE_URL。"
+        )
+    _emit(payload, args)
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pr-check",
@@ -232,6 +264,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # version
     sub.add_parser("version", help="输出版本信息。")
+
+    # config（排查配置来源与数据落点）
+    p_config = sub.add_parser("config", help="显示生效配置文件、SQLite 路径与 LLM/KB 配置状态。")
+    p_config.add_argument(
+        "action", nargs="?", choices=["show"], default="show",
+        help="动作（默认 show；写成 pr-check config 亦可）。",
+    )
 
     # kb（知识库文档管理，替代原 Web /kb/docs）
     p_kb = sub.add_parser("kb", help="管理知识库文档。")
@@ -409,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
             "version": cmd_version,
             "kb": cmd_kb,
             "hook": cmd_hook,
+            "config": cmd_config,
         }[args.command]
         return handler(args)
     except AppError as exc:
