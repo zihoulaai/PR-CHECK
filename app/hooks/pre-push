@@ -1,6 +1,7 @@
 #!/bin/sh
 # PR_CHECK pre-push 钩子：推送前对本地分支做自检，命中 --fail-on 闸门则中断推送。
 # 由 `pr-check hook install` 安装到 .git/hooks/pre-push，并读取仓库根目录的 .pr-check.hook 配置。
+# 本文件作为包内资源随 wheel 分发（app/hooks/pre-push）。
 set -e
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -13,10 +14,29 @@ fi
 PROJECT="${PR_CHECK_PROJECT:?请在 .pr-check.hook 设置 PR_CHECK_PROJECT（知识库项目）}"
 BASE="${PR_CHECK_BASE:-main}"
 FAIL_ON="${PR_CHECK_FAIL_ON:-risk:high rule:violation}"
-# CLI 与解释器路径由 `hook install` 写入 .pr-check.hook（绝对路径）；
-# 旧配置没有这两个变量时回退到「仓库内 bin/pr_check_cli.py + PATH 中的 python」。
 PYTHON="${PR_CHECK_PYTHON:-python}"
-CLI="${PR_CHECK_CLI:-$ROOT/bin/pr_check_cli.py}"
+CLI="${PR_CHECK_CLI:-}"
+MODULE="${PR_CHECK_MODULE:-app.cli}"
+
+# 工具不可用时只告警放行：自检缺失不构成推送阻断（Redis/PATH/解释器被卸载的情况），
+# 强拦只会训练使用者 --no-verify。
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    echo "PR_CHECK: 未找到解释器 $PYTHON，跳过本次自检。" >&2
+    echo "PR_CHECK: 恢复自检：在本仓库重跑 pr-check hook install。" >&2
+    exit 0
+fi
+
+# 调用方式：源码脚本优先（PR_CHECK_CLI 存在且有效），否则走 `python -m <MODULE>`，
+# 后者用于装机形态（uv tool install / uvx），不依赖 PATH 上是否存在 pr-check。
+if [ -n "$CLI" ] && [ -f "$CLI" ]; then
+    set -- "$CLI"
+elif "$PYTHON" -c "import $MODULE" >/dev/null 2>&1; then
+    set -- -m "$MODULE"
+else
+    echo "PR_CHECK: 当前解释器无法导入 $MODULE（工具已被卸载或环境已变更），跳过本次自检。" >&2
+    echo "PR_CHECK: 恢复自检：在本仓库重跑 pr-check hook install。" >&2
+    exit 0
+fi
 
 # 解析 base 引用：本地分支优先，否则退化为 origin/<base>
 if git rev-parse --quiet --verify "refs/heads/$BASE" >/dev/null 2>&1; then
@@ -34,7 +54,7 @@ for spec in $FAIL_ON; do
 done
 
 set +e
-"$PYTHON" "$CLI" check --repo "$ROOT" --base "$BASE_REF" \
+"$PYTHON" "$@" check --repo "$ROOT" --base "$BASE_REF" \
     --project "$PROJECT" --format json $FAIL_ARGS
 RC=$?
 set -e

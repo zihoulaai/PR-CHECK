@@ -126,7 +126,7 @@ def _sample_diff(tmp_path: str) -> str:
 
 
 def test_check_gate_blocks_on_doc_confirm(tmp_path, capsys):
-    from bin.pr_check_cli import EXIT_GATE, cmd_check
+    from app.cli import EXIT_GATE, cmd_check
 
     rc = cmd_check(_check_ns(_sample_diff(tmp_path), fail_on=["doc:confirm"]))
     assert rc == EXIT_GATE
@@ -137,7 +137,7 @@ def test_check_gate_blocks_on_doc_confirm(tmp_path, capsys):
 def test_check_gate_blocks_on_risk_medium(container, tmp_path, capsys):
     """risk:* 需要可溯源证据：LLM 引用真实命中的知识库来源时才会拦截。"""
     from app.adapters.fakes import FakeKB, FakeLLM
-    from bin.pr_check_cli import EXIT_GATE, cmd_check
+    from app.cli import EXIT_GATE, cmd_check
 
     kb = FakeKB()
     kb.add_doc(id="kb-real-1", title="退款接口规范", doc_type="development_rule",
@@ -157,21 +157,21 @@ def test_check_gate_blocks_on_risk_medium(container, tmp_path, capsys):
 
 def test_check_gate_does_not_block_on_unevidenced_risk(container, tmp_path):
     """C 级风险（FakeLLM 默认输出）不再触发 risk 闸门。"""
-    from bin.pr_check_cli import EXIT_OK, cmd_check
+    from app.cli import EXIT_OK, cmd_check
 
     rc = cmd_check(_check_ns(_sample_diff(tmp_path), fail_on=["risk:medium"]))
     assert rc == EXIT_OK
 
 
 def test_check_gate_passes_when_no_match(tmp_path):
-    from bin.pr_check_cli import EXIT_OK, cmd_check
+    from app.cli import EXIT_OK, cmd_check
 
     rc = cmd_check(_check_ns(_sample_diff(tmp_path), fail_on=["rule:violation"]))
     assert rc == EXIT_OK
 
 
 def test_check_gate_invalid_spec_raises(tmp_path):
-    from bin.pr_check_cli import cmd_check
+    from app.cli import cmd_check
     from app.errors import ValidationError
 
     # --fake 报告无 HIGH 风险；risk:extreme 为非法值，应抛校验错误

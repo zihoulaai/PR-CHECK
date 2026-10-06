@@ -12,10 +12,11 @@ import subprocess
 import sys
 
 from app.adapters.fakes import FakeLLM
-from bin.pr_check_cli import cmd_check, cmd_version, main
+from app.cli import cmd_check, cmd_version, main
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CLI = os.path.join(REPO_ROOT, "bin", "pr_check_cli.py")
+# 子进程用例走 `python -m app.cli`（装机与源码形态同一入口），REPO_ROOT 需进 PYTHONPATH
+CLI_MODULE = "app.cli"
 FIXTURE = os.path.join(REPO_ROOT, "tests", "fixtures", "sample_refund.diff")
 
 
@@ -62,13 +63,20 @@ def test_cli_version(capsys):
     assert out["version"]
 
 
+def _run_module(args, env, stdin=None):
+    """以 `python -m app.cli` 起子进程（装机/源码同一入口），带上仓库根 PYTHONPATH。"""
+    run_env = dict(env)
+    run_env["PYTHONPATH"] = REPO_ROOT + os.pathsep + run_env.get("PYTHONPATH", "")
+    return subprocess.run(
+        [sys.executable, "-m", CLI_MODULE, *args],
+        capture_output=True, text=True, env=run_env, input=stdin,
+    )
+
+
 def test_cli_missing_diff_invalid_request():
     """缺 diff：应返回 INVALID_REQUEST 错误信封且退出码 2。"""
     env = dict(os.environ, PR_CHECK_USE_FAKE="1")
-    proc = subprocess.run(
-        [sys.executable, CLI, "check"],
-        capture_output=True, text=True, env=env,
-    )
+    proc = _run_module(["check"], env)
     assert proc.returncode == 2
     body = json.loads(proc.stdout)
     assert body["error"]["code"] == "INVALID_REQUEST"
@@ -79,10 +87,7 @@ def test_cli_stdin_pipe():
     env = dict(os.environ, PR_CHECK_USE_FAKE="1")
     with open(FIXTURE, "r", encoding="utf-8") as fh:
         diff_text = fh.read()
-    proc = subprocess.run(
-        [sys.executable, CLI, "check", "--diff", "-", "--fake"],
-        input=diff_text, capture_output=True, text=True, env=env,
-    )
+    proc = _run_module(["check", "--diff", "-", "--fake"], env, stdin=diff_text)
     assert proc.returncode == 0
     body = json.loads(proc.stdout)
     assert body["meta"]["analysis_mode"] in ("full", "summary_only")

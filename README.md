@@ -12,13 +12,49 @@
 
 ## 安装与运行
 
+统一使用 [uv](https://docs.astral.sh/uv/) 管理环境与命令（本机已装：`C:\Users\Theo\.local\bin\uv.exe`）。按用途三选一：
+
+### A. 日常使用：装成全局命令（推荐）
+
 ```bash
-pip install -r requirements.txt
-cp .env.example .env        # 填写 LLM/KB（可选）
-python bin/pr_check_cli.py --help
+uv tool install .            # 隔离虚拟环境，pr-check 进 PATH
+pr-check version             # 验证安装
+
+uv tool upgrade pr-check     # 升级
+uv tool uninstall pr-check   # 卸载
 ```
 
-离线 / 演示（无需真实凭据）：`python bin/pr_check_cli.py check --diff pr.diff --fake`
+装完后在**任意仓库目录**直接 `pr-check check --repo .`，不必先 cd 到本仓库。
+
+### B. 一次性 / CI：免安装运行
+
+```bash
+uvx --from . pr-check version
+```
+
+临时环境，用完即弃，适合 CI 与偶尔使用。
+
+### C. 开发态：改代码 / 跑测试
+
+```bash
+uv sync --extra dev              # 生成 uv.lock 与 .venv
+uv run pr-check version
+uv run pytest -q
+```
+
+> **无 uv 环境**：`pip install -r requirements.txt` 仍可用；但依赖以 `pyproject.toml` 为唯一事实来源，推荐统一用 uv。
+
+配置初始化（LLM / KB 均可选，不配也能跑基础自检）：
+
+```bash
+cp .env.example .env             # 填写 LLM / KB 凭据
+```
+
+> `.env` 按「包目录 → 当前目录」顺序读取，后者优先：装机形态（A/B）下把 `.env` 放到执行命令的工作目录，或直接导出环境变量。
+
+三档安装共用同一套子命令（`check` / `kb` / `hook` / `version`）：装机形态下 `hook install` 会把调用方式写成 `python -m app.cli`，不再依赖源码路径。
+
+离线 / 演示（无需真实凭据）：`pr-check check --diff pr.diff --fake`
 
 ---
 
@@ -26,10 +62,10 @@ python bin/pr_check_cli.py --help
 
 ```bash
 # 对一段 diff 跑完整自检（离线 Mock 数据）
-cat pr.diff | python bin/pr_check_cli.py check --diff - --fake
+cat pr.diff | pr-check check --diff - --fake
 
 # 直连本地仓库（无需 Token）：读取当前分支相对 main 的变更
-python bin/pr_check_cli.py check --repo . --base main --project team/order
+pr-check check --repo . --base main --project team/order
 ```
 
 ---
@@ -58,11 +94,11 @@ python bin/pr_check_cli.py check --repo . --base main --project team/order
 
 ```bash
 # 对一段 diff（离线或 diff 模式）
-cat pr.diff | python bin/pr_check_cli.py check --diff - --fake
-python bin/pr_check_cli.py check --diff pr.diff --format md
+cat pr.diff | pr-check check --diff - --fake
+pr-check check --diff pr.diff --format md
 
 # 直连本地仓库（无需 Token）
-python bin/pr_check_cli.py check --repo . --base main --project team/order
+pr-check check --repo . --base main --project team/order
 ```
 
 `check` 有两种本地输入：`--repo` 直连 `.git`（无需 Token，不发起网络请求），或 `--diff/--input` 直接喂入 diff 文本。
@@ -72,12 +108,14 @@ python bin/pr_check_cli.py check --repo . --base main --project team/order
 工具本身「只出报告、不拦截」——即便报告有 HIGH 风险，`check` 仍返回退出码 0。要推送时自动拦截，需配合 git hook 与 `--fail-on` 闸门（`--fail-on` 命中返回专用退出码 7 `GATE_FAILED`）：
 
 ```bash
-# 安装 pre-push 钩子（需为 git 仓库）
-python bin/pr_check_cli.py hook install --project team/order --base main \
+# 安装 pre-push 钩子（需在目标 git 仓库目录下执行）
+pr-check hook install --project team/order --base main \
     --fail-on risk:high --fail-on rule:violation
 # 卸载
-python bin/pr_check_cli.py hook uninstall
+pr-check hook uninstall
 ```
+
+> 钩子由包内模板 `app/hooks/pre-push` 生成（随 wheel 分发），三种安装形态都可用。未装机时也可用 `uv run python -m app.cli hook install ...`。
 
 规则格式 `section:value`（可重复）：`risk:high` / `rule:violation` / `doc:confirm` / `debt:direct_match` 等。详见 `docs/USAGE.md §12`。
 
@@ -90,9 +128,9 @@ python bin/pr_check_cli.py hook uninstall
 原 Web 上传改为 CLI 子命令，保留完整 KB 检索能力（按 `project` 强制过滤、跨项目拒绝）：
 
 ```bash
-python bin/pr_check_cli.py kb upload --file api.md --project team/order \
+pr-check kb upload --file api.md --project team/order \
     --doc-type api_document --module pay --title "支付接口"
-python bin/pr_check_cli.py kb list --project team/order
+pr-check kb list --project team/order
 ```
 
 ---
@@ -150,9 +188,11 @@ python bin/pr_check_cli.py kb list --project team/order
 ## 测试与评估
 
 ```bash
-pytest                      # 单测（parser/evidence/kb_query/workflow/cli/kb/local-git）
-python tests/eval_harness.py # 离线评估指标
+uv run pytest -q                        # 单测（parser/evidence/kb_query/workflow/cli/kb/local-git）
+uv run python tests/eval_harness.py     # 离线评估指标
 ```
+
+> `DATABASE_URL` 默认 `sqlite:///./pr_check.db`，相对**当前目录**：装机形态下换目录执行会各建一份库，`kb list` 看不到别处的文档。想共用一份就显式指定绝对路径（`DATABASE_URL=sqlite:///%LOCALAPPDATA%/pr-check/pr_check.db`）。
 
 ---
 
@@ -162,7 +202,7 @@ CLI 是唯一入口，直接驱动 `app` 内既有业务层（parser / workflow 
 
 ```mermaid
 flowchart TD
-    CLI[bin/pr_check_cli.py] --> PARSER[app.parser.diff_parser]
+    CLI[pr-check / python -m app.cli] --> PARSER[app.parser.diff_parser]
     CLI --> WF[app.agent.workflow.run_check]
     CLI --> REPO[app.storage.repo / SQLite]
     WF --> LOCAL[LocalGitAdapter 直连 .git]
@@ -184,5 +224,6 @@ flowchart TD
 ## 技术栈
 
 - 语言：Python 3.11+；依赖收敛为 `pydantic` / `pydantic-settings` / `httpx` / `sqlmodel`（已移除 `fastapi` / `uvicorn` / `python-multipart` / `cryptography`）。
-- 入口：`bin/pr_check_cli.py`，保持纯标准库 `argparse`，不引入新框架。
+- 入口：`app.cli:main`（console script `pr-check`；`python -m app.cli` 等价，`bin/pr_check_cli.py` 为兼容转发），保持纯标准库 `argparse`，不引入新框架。
+- 分发：`uv tool install .` / `uvx --from .`（hatchling 打包，包内资源 `app/hooks/` 随 wheel 走）。
 - 持久化：SQLite（`sqlmodel`）仅存 KB 文档 metadata；凭据不落库。

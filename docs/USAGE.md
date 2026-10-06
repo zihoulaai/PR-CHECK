@@ -9,15 +9,29 @@
 
 ## 1. 安装与运行
 
+统一用 [uv](https://docs.astral.sh/uv/) 管理环境与命令。三种形态等价（`check` / `kb` / `hook` / `version` 一致）：
+
 ```bash
-pip install -r requirements.txt
-cp .env.example .env          # 填写可选的 LLM/KB
-python bin/pr_check_cli.py --help
+# A. 日常：装成全局命令（推荐，隔离环境）
+uv tool install .
+pr-check --help
+
+# B. 一次性 / CI：免安装
+uvx --from . pr-check check --diff pr.diff --fake
+
+# C. 开发态：改代码 / 跑测试
+uv sync --extra dev
+uv run pr-check --help
 ```
 
-离线 / 演示（无需真实凭据）：`python bin/pr_check_cli.py check --diff pr.diff --fake`
+未装 uv 或不想装机时，`python -m app.cli ...` 与旧路径 `pr-check ...`（兼容转发）同样可用；
+`*nix` 还可用包装脚本 `bin/pr-check`。
 
-`*nix` 可用包装脚本 `bin/pr-check`（若存在）；Windows 直接 `python bin/pr_check_cli.py ...`。
+```bash
+cp .env.example .env          # 填写可选的 LLM/KB
+```
+
+离线 / 演示（无需真实凭据）：`pr-check check --diff pr.diff --fake`
 
 ---
 
@@ -64,9 +78,9 @@ python bin/pr_check_cli.py --help
 ### 5.1 对一段 diff（离线或 diff 模式）
 
 ```bash
-cat pr.diff | python bin/pr_check_cli.py check --diff - --fake
-python bin/pr_check_cli.py check --diff pr.diff --format md      # 输出 7 段 Markdown
-python bin/pr_check_cli.py check --diff pr.diff --title "..." --source-branch feat/x \
+cat pr.diff | pr-check check --diff - --fake
+pr-check check --diff pr.diff --format md      # 输出 7 段 Markdown
+pr-check check --diff pr.diff --title "..." --source-branch feat/x \
     --target-branch main --author alice --project team/order
 ```
 
@@ -76,17 +90,17 @@ push 前对本地分支做自检，直接读 `.git`，无需任何 Git 平台账
 
 ```bash
 # 读取当前分支相对 main 的变更（diff 取 base...HEAD）
-python bin/pr_check_cli.py check --repo . --base main --project team/order
+pr-check check --repo . --base main --project team/order
 
 # 显式指定源引用（默认 HEAD，即当前分支最新提交）
-python bin/pr_check_cli.py check --repo /path/to/repo --base develop --source HEAD --project team/order
+pr-check check --repo /path/to/repo --base develop --source HEAD --project team/order
 ```
 
 - `--repo` 即走本地 `local` 适配器，直接读 `.git`，不发起任何网络请求。
 - diff 计算：`git -C <repo> diff <base>...<source>`（source 自 base 分叉以来的变更）。
 - 元数据（源/目标分支、作者、标题、描述）由 `git` 合成；`--project` 用于锁定知识库范围（不给则回退为仓库路径）。
 - 未提交的工作区改动不在 `HEAD` 范围内；如需自检未提交改动，请用 `--diff -` 注入：
-  `git -C <repo> diff main | python bin/pr_check_cli.py check --diff - --project team/order`
+  `git -C <repo> diff main | pr-check check --diff - --project team/order`
 
 ### 5.4 参数
 
@@ -109,7 +123,7 @@ python bin/pr_check_cli.py check --repo /path/to/repo --base develop --source HE
 ## 6. 其它子命令
 
 ```bash
-python bin/pr_check_cli.py version
+pr-check version
 ```
 
 ---
@@ -120,12 +134,12 @@ python bin/pr_check_cli.py version
 
 ```bash
 # 上传知识文档（project 强制过滤，跨项目拒绝）
-python bin/pr_check_cli.py kb upload --file api.md --project team/order \
+pr-check kb upload --file api.md --project team/order \
     --doc-type api_document --module pay --title "支付接口"
 
 # 列出已上传文档 metadata
-python bin/pr_check_cli.py kb list --project team/order
-python bin/pr_check_cli.py kb list --doc-type api_document
+pr-check kb list --project team/order
+pr-check kb list --doc-type api_document
 ```
 
 `kb upload` 参数：`--file`（必填）、`--project`（必填）、`--doc-type`（必填，见 `DocType`）、`--module`、`--title`。
@@ -207,7 +221,7 @@ import subprocess, json
 
 diff = open("pr.diff", encoding="utf-8").read()
 proc = subprocess.run(
-    ["python", "bin/pr_check_cli.py", "check", "--diff", "-", "--fake", "--format", "json"],
+    ["python", "-m", "app.cli", "check", "--diff", "-", "--fake", "--format", "json"],
     input=diff, capture_output=True, text=True,
 )
 if proc.returncode != 0:
@@ -242,7 +256,7 @@ for risk in report["risk"]:
 `doc:*` 的 `confirm`/`update` 本身即「建议确认」语义，不额外设门槛。
 
 ```bash
-python bin/pr_check_cli.py check --diff pr.diff --fake --fail-on risk:high --fail-on rule:violation
+pr-check check --diff pr.diff --fake --fail-on risk:high --fail-on rule:violation
 echo $?   # 命中 -> 7，未命中 -> 0
 ```
 
@@ -250,18 +264,24 @@ echo $?   # 命中 -> 7，未命中 -> 0
 
 ```bash
 # 在仓库根目录执行（需为 git 仓库）
-python bin/pr_check_cli.py hook install --project team/order --base main \
+pr-check hook install --project team/order --base main \
     --fail-on risk:high --fail-on rule:violation
 
 # 卸载
-python bin/pr_check_cli.py hook uninstall
+pr-check hook uninstall
 ```
 
 `hook install` 会：
-1. 在仓库根写入 `.pr-check.hook`（shell 可 source 的配置：PR_CHECK_PROJECT / PR_CHECK_BASE / PR_CHECK_FAIL_ON）；
-2. 把 `hooks/pre-push` 复制到 `.git/hooks/pre-push` 并设为可执行。
+1. 在仓库根写入 `.pr-check.hook`（shell 可 source 的配置：PR_CHECK_PYTHON / PR_CHECK_PROJECT / PR_CHECK_BASE / PR_CHECK_FAIL_ON，
+   外加 CLI 定位方式 `PR_CHECK_CLI`（源码形态）或 `PR_CHECK_MODULE`（装机形态））；
+2. 把包内模板 `app/hooks/pre-push` 复制到 `.git/hooks/pre-push` 并设为可执行。
 
 此后每次 `git push`，钩子读取 `.pr-check.hook`，对当前分支相对 `main`（或 `origin/main`）的变更跑 `check`；命中闸门则中断推送并提示（可用 `git push --no-verify` 跳过，不推荐）。
+
+> **调用方式自适应**：源码形态（`python bin/pr_check_cli.py`）安装时写入脚本绝对路径；
+> 装机形态（`uv tool install` / `uvx`）写入 `PR_CHECK_MODULE=app.cli`，钩子用 `python -m app.cli` 唤起，
+> 不依赖 PATH 上是否存在 `pr-check`。若解释器或模块不可用（工具被卸载 / 环境变更），
+> 钩子只打印告警并放行——自检缺失不应成为推送阻断。
 
 > 注：钩子走本地 `.git` 直连，无需任何 Token；`--project` 仅用于锁定知识库范围。base 默认 `main`，可改；若本地无该分支则退化为 `origin/<base>`。
 

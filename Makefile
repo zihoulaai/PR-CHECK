@@ -5,7 +5,7 @@
 
 PYTHON   ?= python
 PIP       = $(PYTHON) -m pip
-CLI       = $(PYTHON) bin/pr_check_cli.py
+CLI       = $(PYTHON) -m app.cli
 
 .DEFAULT_GOAL := help
 

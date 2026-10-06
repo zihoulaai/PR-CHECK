@@ -72,7 +72,7 @@ def test_local_get_mr_synthesizes_metadata(local_repo):
 
 
 def test_check_repo_end_to_end(local_repo, capsys):
-    from bin.pr_check_cli import cmd_check
+    from app.cli import cmd_check
 
     ns = argparse.Namespace(
         fake=True, repo=str(local_repo), base="main", source="HEAD",

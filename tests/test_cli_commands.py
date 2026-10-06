@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from bin.pr_check_cli import cmd_kb
+from app.cli import cmd_kb
 
 
 def _ns(**over):

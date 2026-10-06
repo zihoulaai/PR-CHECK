@@ -4,7 +4,7 @@
     {"error": {"code": "...", "message": "..."}}
 内部异常 / 堆栈 / Token 等不得暴露（M5 / S3）。
 
-CLI 通过 AppError.to_body() 产出同样的信封，配合退出码返回（见 bin/pr_check_cli.py）。
+CLI 通过 AppError.to_body() 产出同样的信封，配合退出码返回（见 app.cli）。
 """
 from __future__ import annotations
 
