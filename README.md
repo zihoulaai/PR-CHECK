@@ -197,7 +197,7 @@ pr-check kb list --project team/order
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K | 否 |
 | `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata，默认 `%LOCALAPPDATA%\pr-check\pr_check.db` / `$XDG_STATE_HOME/pr-check/pr_check.db`） | 否 |
-| `APP_ENV` | 运行环境（默认 `dev`） | 否 |
+| `APP_ENV` | 运行环境（默认 `dev`）。设为 `prod` / `production`（大小写不敏感）时启动强制校验：`LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`/`KB_BASE_URL`/`KB_API_KEY` 必须全部配齐，缺失即报 `NOT_CONFIGURED`（退出码 3）拒绝运行，避免静默降级、闸门永不触发 | 否 |
 | `PR_CHECK_DEBUG` | `1` / `true` / `yes` / `on` 开启调试日志（KB 降级原因、适配器异常类型等输出到 stderr） | 否 |
 
 ---

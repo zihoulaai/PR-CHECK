@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from app.cli import main
 from app.config import (
@@ -18,6 +19,21 @@ from app.config import (
     USER_STATE_DIR,
     _PROJECT_ROOT,
     active_config_files,
+)
+from app.errors import NotConfiguredError
+
+# prod 强制校验的五个必填环境变量（测试按名断言错误提示）
+_PROD_REQUIRED_ENV = (
+    "LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY",
+    "KB_BASE_URL", "KB_API_KEY",
+)
+# 与 _PROD_REQUIRED_ENV 对应的 Settings 构造参数
+_FULL_CREDS = dict(
+    llm_base_url="https://llm.example.invalid/v1",
+    llm_model="test-model",
+    llm_api_key="test-llm-key",
+    kb_base_url="https://kb.example.invalid",
+    kb_api_key="test-kb-key",
 )
 
 
@@ -101,3 +117,100 @@ def test_env_template_matches_repo_example():
     if not example.is_file():
         pytest.skip("非源码树：wheel 形态不附带 .env.example，无同步基准")
     assert ENV_TEMPLATE == example.read_text(encoding="utf-8")
+
+
+# ===== APP_ENV=prod 必填凭据强制校验 =====
+def test_dev_allows_missing_credentials():
+    """dev（默认）：凭据全部缺失也能构造，保持离线/降级运行能力。"""
+    s = Settings(_env_file=None, app_env="dev")
+    assert s.llm_api_key is None
+    assert s.kb_api_key is None
+
+
+@pytest.mark.parametrize("app_env", ["dev", "test", "staging", ""])
+def test_non_prod_envs_not_validated(app_env):
+    """非生产环境值（含空串）不触发强校验。"""
+    assert Settings(_env_file=None, app_env=app_env).app_env == app_env
+
+
+def test_prod_missing_all_credentials_lists_every_var():
+    """prod 且五项全缺：拒绝构造，错误一次性列出全部缺失变量名。"""
+    with pytest.raises(PydanticValidationError) as exc:
+        Settings(_env_file=None, app_env="prod")
+    message = str(exc.value)
+    for name in _PROD_REQUIRED_ENV:
+        assert name in message
+
+
+def test_prod_reports_only_missing_items():
+    """prod 且仅缺 KB_API_KEY：错误只点名 KB_API_KEY，不牵连已配置项。"""
+    with pytest.raises(PydanticValidationError) as exc:
+        Settings(_env_file=None, app_env="prod", **{**_FULL_CREDS, "kb_api_key": "  "})
+    message = str(exc.value)
+    assert "KB_API_KEY" in message
+    for name in ("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY", "KB_BASE_URL"):
+        assert name not in message
+
+
+def test_prod_passes_when_all_credentials_present():
+    """prod 且五项齐全（production 别名）：正常构造。"""
+    s = Settings(_env_file=None, app_env="production", **_FULL_CREDS)
+    assert s.app_env == "production"
+
+
+@pytest.mark.parametrize("app_env", ["prod", "PROD", "Prod", " production ", "Production"])
+def test_prod_env_name_matching(app_env):
+    """prod/production 大小写不敏感、忽略首尾空白，均触发强校验。"""
+    with pytest.raises(PydanticValidationError):
+        Settings(_env_file=None, app_env=app_env)
+
+
+@pytest.fixture
+def prod_env(monkeypatch):
+    """APP_ENV=prod 且五项必填均注入哨兵值（环境变量优先级高于 .env，隔绝本机真实配置）。
+
+    用例可把某一项 setenv 成 "" 模拟该项缺失；前后均清 get_settings 缓存。
+    """
+    from app.config import get_settings
+
+    env = {"APP_ENV": "prod", **{
+        "LLM_BASE_URL": _FULL_CREDS["llm_base_url"],
+        "LLM_MODEL": _FULL_CREDS["llm_model"],
+        "LLM_API_KEY": _FULL_CREDS["llm_api_key"],
+        "KB_BASE_URL": _FULL_CREDS["kb_base_url"],
+        "KB_API_KEY": _FULL_CREDS["kb_api_key"],
+    }}
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    get_settings.cache_clear()
+    yield monkeypatch
+    get_settings.cache_clear()
+
+
+def test_get_settings_prod_missing_raises_not_configured(prod_env):
+    """get_settings 把 prod 校验失败转成 NOT_CONFIGURED 业务错误（而非 pydantic 堆栈）。"""
+    from app.config import get_settings
+
+    prod_env.setenv("KB_API_KEY", "")
+    with pytest.raises(NotConfiguredError) as exc:
+        get_settings()
+    assert exc.value.code == "NOT_CONFIGURED"
+    assert "KB_API_KEY" in str(exc.value)
+
+
+def test_cli_config_show_prod_missing_returns_rc3(prod_env, capsys):
+    """CLI 任意命令加载配置即拦截：config show 在 prod 缺凭据时返回 rc 3 错误信封。"""
+    prod_env.setenv("LLM_API_KEY", "")
+    assert main(["config", "show"]) == 3
+    body = json.loads(capsys.readouterr().out)
+    assert body["error"]["code"] == "NOT_CONFIGURED"
+    assert "LLM_API_KEY" in body["error"]["message"]
+
+
+def test_cli_config_show_prod_configured_ok(prod_env, capsys):
+    """prod 五项齐全时 config show 正常输出，并标记 LLM/KB 均已配置。"""
+    assert main(["config", "show"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["app_env"] == "prod"
+    assert payload["llm_configured"] is True
+    assert payload["kb_configured"] is True

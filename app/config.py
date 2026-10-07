@@ -2,6 +2,9 @@
 
 环境变量：APP_ENV / DATABASE_URL / LLM_* / KB_*。
 三档 PR 阈值与 KB Top-K 可配置，便于调参。
+
+APP_ENV=prod / production 时启动强制凭据校验：LLM 三件套与 KB 凭据必须全部配齐，
+缺失即在配置加载阶段报 NOT_CONFIGURED，避免生产环境静默降级、闸门永不触发。
 """
 from __future__ import annotations
 
@@ -9,8 +12,10 @@ from functools import lru_cache
 import os
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import ValidationError as PydanticValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.errors import NotConfiguredError
 
 # 项目根（app/ 的上一级）。git 钩子等场景下 cwd 是被检仓库，读不到 cwd 的 .env，
 # 因此把项目自带 .env 也作为来源；cwd 的 .env 仍放在最后，保持最高优先级。
@@ -39,11 +44,41 @@ USER_STATE_DIR = _user_dir("state")
 USER_ENV_FILE = USER_CONFIG_DIR / ".env"
 LEGACY_CWD_DB = Path("pr_check.db")
 
+# 触发生产环境强校验的 APP_ENV 取值（大小写不敏感、忽略首尾空白）。
+PROD_APP_ENVS = frozenset({"prod", "production"})
+
+# APP_ENV=prod 时必须配齐的凭据（Settings 字段名 -> .env 变量名）。
+# LLM 是自检的硬依赖；KB 在 dev 下允许缺省并降级为基础自检，但 prod 下闸门
+# risk:high / rule:violation 依赖 A/B 级 KB 证据，缺凭据会静默永不触发，
+# 构成「以为受保护」的信任陷阱，因此同样强制。
+PROD_REQUIRED_FIELDS: dict[str, str] = {
+    "llm_base_url": "LLM_BASE_URL",
+    "llm_model": "LLM_MODEL",
+    "llm_api_key": "LLM_API_KEY",
+    "kb_base_url": "KB_BASE_URL",
+    "kb_api_key": "KB_API_KEY",
+}
+
+
+def missing_prod_credentials(s: "Settings") -> list[str]:
+    """返回 prod/production 环境下缺失（未填或为空白）的必填变量名；其余环境返回 []。"""
+    if (s.app_env or "").strip().lower() not in PROD_APP_ENVS:
+        return []
+    return [
+        env_name
+        for field_name, env_name in PROD_REQUIRED_FIELDS.items()
+        if not str(getattr(s, field_name) or "").strip()
+    ]
+
+
 # `pr-check config init` 的 .env 模板。装机形态（wheel）不随包附带仓库根的
 # `.env.example`，模板必须内嵌于代码；tests/test_config_paths.py 有同步断言，
 # 改动 `.env.example` 时必须同步此处，防止两份漂移。
 ENV_TEMPLATE = """\
 # ===== 应用基础 =====
+# 运行环境：dev（默认，凭据缺失时允许离线/降级运行）；设为 prod / production 时
+# 启动强制校验——LLM_BASE_URL、LLM_MODEL、LLM_API_KEY、KB_BASE_URL、KB_API_KEY
+# 必须全部配齐，缺失即拒绝运行（NOT_CONFIGURED），避免生产环境静默降级、闸门失效。
 APP_ENV=dev
 # SQLite 数据库路径（存 KB 文档元数据）
 # 留空（注释掉）则默认落到用户状态目录：
@@ -134,10 +169,37 @@ class Settings(BaseSettings):
     # KB（D8）
     kb_top_k: int = 5
 
+    @model_validator(mode="after")
+    def _prod_requires_credentials(self) -> "Settings":
+        """prod/production：LLM 三件套 + KB 凭据缺一即拒绝启动（一次性列出全部缺项）。"""
+        missing = missing_prod_credentials(self)
+        if missing:
+            raise ValueError(
+                "APP_ENV=prod 为生产环境，以下必填配置缺失或为空："
+                + "、".join(missing)
+                + "。请在 .env 中补全后重试（可用 `pr-check config init` 生成模板，"
+                "`pr-check config show` 查看配置来源）。"
+            )
+        return self
+
+
+def _settings_error_message(exc: PydanticValidationError) -> str:
+    """提取配置校验错误的人类可读信息（优先取 model_validator 抛出的原始 ValueError）。"""
+    parts: list[str] = []
+    for err in exc.errors():
+        cause = (err.get("ctx") or {}).get("error")
+        parts.append(str(cause) if cause else err.get("msg", "配置校验失败。"))
+    return "；".join(parts) or "配置校验失败。"
+
 
 @lru_cache
 def get_settings() -> Settings:
-    settings = Settings()
+    try:
+        settings = Settings()
+    except PydanticValidationError as exc:
+        # 配置层校验（prod 必填凭据等）转成统一业务错误：CLI 顶层映射
+        # NOT_CONFIGURED（rc=3），不向用户暴露 pydantic 原始堆栈。
+        raise NotConfiguredError(_settings_error_message(exc)) from exc
     try:
         # SQLite 不会自建父目录，缺省路径下需先兜住（自定义 DATABASE_URL 时这一步无副作用）。
         USER_STATE_DIR.mkdir(parents=True, exist_ok=True)

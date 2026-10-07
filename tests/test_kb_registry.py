@@ -24,8 +24,10 @@ def _settings(**overrides) -> Settings:
 
 
 def test_no_credentials_returns_none():
-    assert build_kb(Settings(kb_base_url=None, kb_api_key=None)) is None
-    assert build_kb(Settings(kb_base_url="x", kb_api_key=None)) is None
+    # 显式 app_env=dev：本机用户级 .env 若为 prod 会触发强校验，与本用例意图无关，
+    # 测试结果不应依赖环境文件（显式构造参数优先级最高，凭据传 None 即缺省）。
+    assert build_kb(Settings(app_env="dev", kb_base_url=None, kb_api_key=None)) is None
+    assert build_kb(Settings(app_env="dev", kb_base_url="x", kb_api_key=None)) is None
 
 
 def test_default_provider_is_maas():
