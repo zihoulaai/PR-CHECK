@@ -100,3 +100,29 @@ def test_high_impact_feature_paired_with_type():
 
     _, hi2 = _detect("src/Order.java", "private String author;")
     assert HighImpactFeature.PERMISSION not in hi2
+
+
+# ===== R5：Kotlin / Scala 复用同一套关键词规则 =====
+@pytest.mark.parametrize("language,path", [("kotlin", "src/Tx.kt"), ("scala", "src/Tx.scala")])
+def test_jvm_languages_share_keyword_rules(language, path):
+    lines = [LineChange(text="@Transactional", change="added"),
+             LineChange(text="cache.put(k, v)", change="added")]
+    ct, hi = detect_change_types(path, lines, get_language_parser(language), language)
+    assert ChangeType.TRANSACTION_CHANGE in ct
+    assert ChangeType.CACHE_CHANGE in ct
+    assert HighImpactFeature.TRANSACTION in hi
+
+
+@pytest.mark.parametrize("language,path", [("kotlin", "src/A.kt"), ("scala", "src/A.scala")])
+def test_jvm_author_family_still_not_auth(language, path):
+    lines = [LineChange(text="private val author: String", change="added")]
+    ct, _ = detect_change_types(path, lines, get_language_parser(language), language)
+    assert ChangeType.AUTH_CHANGE not in ct
+
+
+def test_jvm_api_annotation_marks_api_change():
+    lines = [LineChange(text="@RestController", change="added")]
+    for language, path in (("kotlin", "src/C.kt"), ("scala", "src/C.scala")):
+        ct, hi = detect_change_types(path, lines, get_language_parser(language), language)
+        assert ChangeType.API_CHANGE in ct
+        assert HighImpactFeature.PUBLIC_API in hi

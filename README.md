@@ -84,9 +84,12 @@ pr-check check --repo . --base main --project team/order
 
 | 子命令 | 作用 |
 |---|---|
-| `check` | 对 diff 或本地仓库执行**完整**自检 |
+| `check` | 对 diff / 本地仓库 / 远端 MR 执行**完整**自检 |
 | `hook` | 管理 git 钩子（pre-push 拦截），配合 `--fail-on` 闸门 |
-| `kb` | 管理知识库文档（`upload` / `list` / `import` / `delete`） |
+| `kb` | 管理知识库文档（`upload` / `list` / `import` / `delete` / `suggest` / `verify`） |
+| `feedback` | 标记报告条目误报 / 有用（本地记录，供 `metrics` 统计） |
+| `metrics` | 统计误报率 / 有用率与闸门命中 / 驳回次数 |
+| `cache` | 管理 LLM 结果缓存（`clear`，默认关闭） |
 | `version` | 版本信息 |
 | `config` | `init` 生成 `.env`；`show` 显示生效配置来源、SQLite 路径与 LLM/KB 配置状态 |
 | `completions` | 打印 shell 补全脚本（`bash` / `zsh` / `fish`），候选由 parser 树实时生成 |
@@ -102,9 +105,12 @@ pr-check check --diff pr.diff --format md
 
 # 直连本地仓库（无需 Token）
 pr-check check --repo . --base main --project team/order
+
+# 远端平台只读拉取（CI 对齐真实 MR，需 Token）
+pr-check check --platform github --repo owner/repo --mr 7 --project team/order --ci
 ```
 
-`check` 有两种本地输入：`--repo` 直连 `.git`（无需 Token，不发起网络请求），或 `--diff/--input` 直接喂入 diff 文本。
+`check` 输入方式：`--repo` 直连 `.git`（`platform=local`，无需 Token）；`--platform github|gitlab` 从平台 API 只读拉取真实 MR 元数据与 diff（需 `GIT_TOKEN`，见 `docs/USAGE.md §5.4`）；或 `--diff/--input` 直接喂入 diff 文本。
 
 ### 提交拦截（git pre-push 钩子）
 
@@ -146,6 +152,21 @@ pr-check kb upload --file api.md --project team/order \
 pr-check kb list --project team/order
 ```
 
+知识库生命周期闭环（R1，均**只读**、不依赖向量库凭据）：
+
+```bash
+pr-check kb suggest --repo . --base main --project team/order   # 本次变更触及但未覆盖的文档/模块
+pr-check kb verify --repo . --project team/order                # 文档提到的符号在代码里是否已失效（漂移检测）
+```
+
+反馈、度量与结果缓存（R2 / R3，本地 SQLite，默认：反馈开、缓存关）：
+
+```bash
+pr-check feedback --report-id <id> --item risk:0 --label fp   # 标记误报 / 有用（幂等覆盖）
+pr-check metrics --project team/order                         # 误报率 / 有用率 + 闸门命中统计
+PR_CHECK_CACHE=1 pr-check check --repo . && pr-check cache clear   # 缓存命中报告，clear 清空
+```
+
 ---
 
 ## 三档分析模式
@@ -161,7 +182,9 @@ pr-check kb list --project team/order
 
 「高影响特征」覆盖 `HighImpactFeature` 全部取值（公共 API、数据库、配置、权限、事务、缓存、序列化、并发、外部依赖、日志）；`focused` 下若变更不含任何高影响特征则保留全部 Diff。
 
-**模块推导**：跳过 `src` / `lib` / `app` / `main` / `java` / `resources` / `test` 等纯布局目录，取第一个有业务语义的目录段（`src/main/java/com/x/Foo.java` → `com`）；`core` / `common` / `server` 视为真实模块名。
+**模块推导**：跳过 `src` / `lib` / `app` / `main` / `java` / `kotlin` / `scala` / `resources` / `test` 等纯布局目录，取第一个有业务语义的目录段（`src/main/java/com/x/Foo.java` → `com`）；`core` / `common` / `server` 视为真实模块名。
+
+**支持语言**（符号抽取）：Java / Kotlin / Scala / Python / TypeScript·JavaScript / Go；未识别语言降级为文件级 + 关键词（不假装识别 class/method）。详见 `docs/USAGE.md §17`。
 
 ---
 
@@ -196,9 +219,13 @@ pr-check kb list --project team/order
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K | 否 |
+| `GIT_PLATFORM` | Git 数据源：`local`（默认，直连 `.git`）/ `github` / `gitlab`（只读 API，需 Token） | 否（默认 `local`） |
+| `GIT_BASE_URL` / `GIT_TOKEN` | 远端平台 API 基址与访问 Token（`local` 模式忽略）；留空用官方默认 API 基址 | 否 |
 | `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata，默认 `%LOCALAPPDATA%\pr-check\pr_check.db` / `$XDG_STATE_HOME/pr-check/pr_check.db`） | 否 |
 | `APP_ENV` | 运行环境（默认 `dev`）。设为 `prod` / `production`（大小写不敏感）时启动强制校验：`LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY`/`KB_BASE_URL`/`KB_API_KEY` 必须全部配齐，缺失即报 `NOT_CONFIGURED`（退出码 3）拒绝运行，避免静默降级、闸门永不触发 | 否 |
 | `PR_CHECK_DEBUG` | `1` / `true` / `yes` / `on` 开启调试日志（KB 降级原因、适配器异常类型等输出到 stderr） | 否 |
+| `PR_CHECK_CACHE` | `1` 启用 LLM 结果缓存（同一变更不重复烧 token，`report.meta.cache_hit=true`）；默认关闭 | 否 |
+| `PR_CHECK_FEEDBACK` | `0` 关闭闸门事件采集（`feedback` / `metrics` 的本地数据）；默认开启 | 否 |
 
 ---
 

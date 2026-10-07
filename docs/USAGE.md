@@ -47,7 +47,11 @@ cp .env.example .env          # 填写可选的 LLM/KB
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
 | `KB_TOP_K` | 知识检索 Top-K（真正注入 adapter，不再硬编码） | 否（默认 5） |
+| `GIT_PLATFORM` | Git 数据源：`local`（默认，直连 `.git`）/ `github` / `gitlab`（只读 API，需 Token） | 否（默认 `local`） |
+| `GIT_BASE_URL` / `GIT_TOKEN` | 远端平台 API 基址与访问 Token（`local` 模式忽略）；留空用官方默认 API 基址 | 否 |
 | `DATABASE_URL` | SQLite 路径（存 KB 文档 metadata） | 否（默认用户状态目录，见下） |
+
+> **shell 环境变量开关**（不写入 `.env`，由进程环境读取）：`PR_CHECK_DEBUG=1`（DEBUG 日志到 stderr）、`PR_CHECK_CACHE=1`（启用 LLM 结果缓存，R3）、`PR_CHECK_FEEDBACK=0`（关闭闸门事件采集，R2）。详见 §16。
 
 **配置来源**（优先级从高到低）：当前目录 `.env` → 用户级 `%APPDATA%\pr-check\.env`（Linux/macOS：`$XDG_CONFIG_HOME/pr-check/.env`）→ 包/源码目录 `.env`。
 
@@ -86,14 +90,19 @@ pr-check config init --path ~/my.env --force   # 覆盖已存在文件（默认�
 - **diff 文本**：`--diff <file|->`（或 `--input -` 管道），直接对已有 diff 跑自检；适合 CI / 离线。
 - **本地仓库**：`--repo <path>` 直连 `.git`，读取当前分支相对 `--base` 的变更并合成元数据；适合 push 前自检。
 
+另支持**远端平台只读拉取**（R4）：`--platform github|gitlab` 时改从平台 API 取真实 MR/PR 元数据与 diff（需 Token），见 §5.4。
+
 ---
 
 ## 4. 子命令总览
 
 | 子命令 | 作用 | 章节 |
 |---|---|---|
-| `check` | 对 diff 或本地仓库执行**完整**自检 | §5 |
-| `kb` | 管理知识库文档（`upload` / `list` / `import` / `delete`） | §7 |
+| `check` | 对 diff / 本地仓库 / 远端 MR 执行**完整**自检 | §5 |
+| `kb` | 管理知识库文档（`upload` / `list` / `import` / `delete` / `suggest` / `verify`） | §7 |
+| `feedback` | 标记报告条目误报 / 有用（本地记录，供 `metrics` 统计） | §16 |
+| `metrics` | 统计误报率 / 有用率与闸门命中 / 驳回次数 | §16 |
+| `cache` | 管理 LLM 结果缓存（`clear`，默认关闭） | §16 |
 | `hook` | 管理 git 钩子（pre-push 拦截），配合 `--fail-on` 闸门 | §12 |
 | `config` | `init` 生成 `.env` 模板；`show` 显示生效配置来源、SQLite 路径与 LLM/KB 配置状态 | §2、§6 |
 | `completions` | 打印 shell 补全脚本（`bash` / `zsh` / `fish`），候选由 parser 树实时生成 | §6 |
@@ -139,9 +148,13 @@ pr-check check --repo /path/to/repo --base develop --source HEAD --project team/
 | `--diff FILE` / `--input FILE` | diff 文件；`-` 表示从管道读取。`--input` 置于子命令之前或之后均可 |
 | `--project` | 项目路径（用于 KB 检索范围与报告标题；可选） |
 | `--title` / `--description` / `--source-branch` / `--target-branch` / `--author` | diff 模式附带的 PR 元数据 |
-| `--repo` | 本地仓库路径（直连 `.git`，无需 Token） |
+| `--repo` | 本地仓库路径（`platform=local` 直连 `.git`）；远端平台时为项目路径（`owner/repo` 或 `group/project`） |
 | `--base` | 本地模式目标分支（默认 main），用于计算 diff |
 | `--source` | 本地模式源引用（默认 HEAD，即当前分支最新提交） |
+| `--platform` | Git 数据源：`local`（默认）/ `github` / `gitlab`（只读 API，需 Token），见 §5.4 |
+| `--mr NUMBER` | 远端平台 MR/PR 编号（`platform=github/gitlab` 时必填） |
+| `--git-base-url URL` | 远端平台 API 基址（覆盖 `GIT_BASE_URL`；留空用官方默认） |
+| `--git-token TOKEN` | 远端平台访问 Token（覆盖 `GIT_TOKEN`） |
 | `--fake` | 使用离线 Fake 适配器 |
 | `--format` | `json`（默认）或 `md` |
 | `--pretty` | JSON 缩进美化（仅 `check` 支持） |
@@ -152,6 +165,27 @@ pr-check check --repo /path/to/repo --base develop --source HEAD --project team/
 `check` 输入判定：`--repo` 给定走本地 `.git`；否则必须提供 `--diff/--input` 喂入 diff 文本。
 
 > `check` 本身**只出报告、不拦截**：即便报告有 HIGH 风险，未带 `--fail-on` 时仍返回退出码 0。
+
+### 5.4 远端平台只读拉取（`--platform github|gitlab`，R4）
+
+CI 场景下从平台 API 取**真实 MR 元数据 + diff**，使 `--ci` 输出的 `note_body` 与真实 MR 编号 / 标题对齐。适配器**只读**，不做任何写操作（不自动贴评论、不改 MR 状态）：
+
+```bash
+# GitHub（GIT_TOKEN 可放 .env）
+pr-check check --platform github --repo owner/repo --mr 7 \
+    --project team/order --ci
+
+# GitLab（自建填 API 基址）
+pr-check check --platform gitlab --repo group/project --mr 42 \
+    --git-base-url https://gitlab.example.com/api/v4 --git-token <token> \
+    --project team/order --ci
+```
+
+- `--repo` 为**项目路径**（GitHub `owner/repo`；GitLab `group/project`，内部按 `group%2Fproject` 编码）；
+- `--mr` 为 MR/PR 编号（GitHub `pull_number` == GitLab `iid`），缺 `--repo` 或 `--mr` 返回 `INVALID_REQUEST`（退出码 2）；
+- 连接参数优先级：`--git-base-url` / `--git-token` > `GIT_BASE_URL` / `GIT_TOKEN`；基址留空用官方默认（`https://api.github.com` / `https://gitlab.com/api/v4`）；
+- 鉴权 / 权限 / 网络降级：401 → `GIT_AUTH_FAILED`、403 → `GIT_FORBIDDEN`、404 → `MR_NOT_FOUND` / `PROJECT_NOT_FOUND`、超时与网络不可达 → `GIT_UNAVAILABLE`，均映射退出码 **4**；**Token 缺失不静默发匿名请求**，直接 `GIT_AUTH_FAILED`；
+- HTTP 走既有 `httpx`，不引入 Web 框架；新增平台只需在 `app/adapters/registry.py` 的 `GIT_ADAPTERS` 登记一个实现 `GitPlatformAdapter` 的类，未知平台显式报 `GIT_UNAVAILABLE`（不静默回落本地）。
 
 ---
 
@@ -244,6 +278,24 @@ KB_PROVIDER=openai  KB_BASE_URL=https://rag.example.com  KB_API_KEY=xxx \
 
 > 新增供应商只需在 `app/adapters/registry.py` 的 `PROVIDERS` 登记一个实现
 > `KnowledgeBase`（search / upload）的类；未知 `KB_PROVIDER` 会显式报错（退出码 6），不静默回落，避免误配用错库。
+
+### 知识生命周期闭环（`kb suggest` / `kb verify`，R1）
+
+两个子命令均为**只读**：只读本地元数据与仓库文件，**不触碰向量库**，因此未配置 KB 凭据（`KB_BASE_URL` / `KB_API_KEY`）时也可用。退出码：0 成功 / 2 参数错（仓库路径不存在）/ 4 `kb suggest` 的 git 失败（非 git 仓库或 `--base` 分支不存在；`kb verify` 不走 git 子进程，不受此影响）；二者无 KB 侧失败路径，不存在退出码 6。
+
+```bash
+# 覆盖率建议：本次变更触及的模块，是否已有知识文档覆盖
+pr-check kb suggest --repo . --base main --project team/order
+# {"changed_modules": ["inventory", "pay"], "affected_docs": [...], "coverage_gaps": ["inventory"]}
+
+# 漂移检测：文档提到的符号在代码里是否还存在（确定性匹配，非语义比对）
+pr-check kb verify --repo . --project team/order
+# {"stale_suspects": [...], "drift_suspects": [...], "checked": N}
+```
+
+- `kb suggest` 参数：`--repo`（默认 `.`）、`--base`（默认 `main`）、`--source`（默认 `HEAD`）、`--project`（**必填**，KB 文档按项目隔离）。输出 `changed_modules`（变更模块）、`affected_docs`（可能受影响的既有文档）、`coverage_gaps`（无文档覆盖的模块），引导人工补录——**只建议、不自动写入**。
+- `kb verify` 参数：`--repo`（默认 `.`）、`--project`（可选，默认全部）。对 `doc_type=api_document` / `development_rule` 的文档，用其 `module` + `snippet` 关键词在目标仓库做符号 / 路径存在性匹配：`stale_suspects`（文档提及的符号在代码中已无任何命中，疑似僵尸规范）、`drift_suspects`（部分命中，疑似漂移）。
+- 二者**不引入 LLM**，确定性可复现，纳入离线回归（`make eval`）。「文档与代码一致」不误报，仅对真实缺失符号报出。
 
 ---
 
@@ -500,7 +552,70 @@ for risk in report["risk"]:
 
 ---
 
-## 15. 常见问题（FAQ）
+## 16. 反馈与度量（`feedback` / `metrics`）与缓存（`cache`）
+
+**反馈采集（R2，默认开启）**：`feedback` 对报告条目打标，写入本地 SQLite（`report_feedback` 表），**只落条目指纹不落报告原文**；`PR_CHECK_FEEDBACK=0` 可关闭整个采集链路。
+
+```bash
+# 先拿到报告标识（check 输出 / 报告 meta.report_id，如 team-order-feature-x-a1b2c3d4e5f6）
+pr-check check --repo . --base main --project team/order --format json | \
+    python -c "import json,sys; print(json.load(sys.stdin)['meta']['report_id'])"
+
+# 标记条目：<section>:<index>，label 取 fp（误报）/ useful（有用）
+pr-check feedback --report-id team-order-feature-x-a1b2c3d4e5f6 \
+    --item risk:0 --label fp --note "该风险在本项目已有统一拦截"
+```
+
+- `feedback` 参数：`--report-id`（必填）、`--item`（必填，`<section>:<index>`）、`--label`（必填，`fp` / `useful`）、`--note`、`--project`。
+- **幂等**：同一 `report_id + item_key`（条目文本哈希）重复标记为**覆盖**而非追加，修正标注不会污染统计。
+- 非法 `--item`（未知 section 或越界序号）返回 `INVALID_REQUEST`（退出码 2）。
+
+```bash
+# 度量视图：误报率 / 有用率 + 各 --fail-on 规则的命中与驳回
+pr-check metrics
+pr-check metrics --project team/order --since 2026-10-01T00:00:00+00:00
+```
+
+- `metrics` 参数：`--project`、`--since`（ISO 时间下界，含）。
+- 无数据时输出明确的「暂无数据」而非报错（对齐 summary_only 的「不谎报」风格）。
+- 闸门事件（`--fail-on` 命中 / 驳回）默认自动记录（`gate_events` 表），重复 `check` 不会虚增统计（按 `report_id + specs` 幂等）。
+
+**结果缓存（R3，默认关闭）**：`PR_CHECK_CACHE=1` 开启后，同一变更（`diff` + `model` + prompt 版本 + KB 命中集**全部一致**）不重复调用 LLM，直接复用上次报告。
+
+```bash
+PR_CHECK_CACHE=1 pr-check check --repo . --base main --project team/order
+pr-check cache clear                    # 清空缓存
+pr-check cache clear --project team/order   # 只清某项目
+```
+
+- 缓存键任一要素变化即失效：改 `SYSTEM_PROMPT`（prompt 版本）、换模型、KB 新增命中来源都会让缓存失效，**新知识不会「看不到」**；
+- 命中缓存的报告**仍会重跑 Evidence 校验**（`sanitize_report`），伪造 `source_refs` 依旧被降级——证据校验不可被缓存绕过；
+- 命中时报告 `meta.cache_hit=true`（Markdown 元信息行标注「缓存：命中」）；
+- 容量上限默认 500 条，超出按最旧 `created_at` 淘汰；表随 `init_db()` 自动创建，无需迁移工具。
+
+> R3 是「重复分析消除」（整份 diff 级），**不是**文件级增量分析：`ChangeProfile` 与 checklist 依赖全局 diff，文件级拼接会改变画像，明确不做。
+
+---
+
+## 17. 支持的语言与降级
+
+Diff Parser 采用「语言可插拔启发式规则」（不使用 LLM 抽符号），当前登记语言：
+
+| 语言 | 扩展名 | 抽取能力 |
+|---|---|---|
+| Java | `.java` | class / interface / enum / record / method / field + API 注解 |
+| Kotlin | `.kt` / `.kts` | data class / enum class / object / interface / fun（含扩展函数）/ val·var（R5） |
+| Scala | `.scala` / `.sc` | class / trait / object / case class / def / val·var（R5） |
+| Python | `.py` | class / function / 导入 |
+| TypeScript / JavaScript | `.ts` / `.tsx` / `.js` / `.jsx` / `.mjs` / `.cjs` | class / interface / function |
+| Go | `.go` | struct / interface / func |
+
+- 未识别语言**降级为文件级 + 关键词**（不假装识别 class / method）：符号列表为空，但文件路径 / 模块推导 / 增删行统计与关键词驱动的变更类型（AUTH / CACHE / TRANSACTION / SERIALIZATION）仍生效；
+- 新增语言只需实现 `app/parser/` 下的 `LanguageParser` 并在 `_REGISTRY` 登记、在 `_EXT_MAP` 补扩展名，无需改动解析主线。
+
+---
+
+## 18. 常见问题（FAQ）
 
 **Q1. 报告里没有 LLM 段落？**
 A. 未配置 `LLM_*` 时自检仍返回基础风险段（降级契约）；配置后才会生成 LLM 段落。可用 `pr-check config show` 看 `llm_configured` 是否为 `true`。

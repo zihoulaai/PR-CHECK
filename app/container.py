@@ -90,5 +90,24 @@ def reset_container() -> None:
 
 
 def select_git_adapter(platform: str) -> GitPlatformAdapter:
-    """按平台选择 Git 适配器；当前仅支持本地（local）。"""
-    return get_container().git_adapters[Platform.LOCAL.value]
+    """按平台选择 Git 适配器（R4：local / github / gitlab）。
+
+    - 已注入容器的平台（测试 Fake / 显式 override）优先，便于离线联调；
+    - ``local`` 恒可用（容器默认持有 LocalGitAdapter）；
+    - 远端平台未注入时按配置构建（``git_base_url`` / ``git_token``）。
+    """
+    c = get_container()
+    key = (platform or Platform.LOCAL.value).strip().lower()
+    adapter = c.git_adapters.get(key)
+    if adapter is not None:
+        return adapter
+    if key == Platform.LOCAL.value:
+        # 容器未持有本地适配器（罕见）：按需构建，避免 KeyError
+        from app.adapters.local_git import LocalGitAdapter
+
+        return LocalGitAdapter()
+
+    from app.adapters.registry import build_git
+    from app.config import get_settings
+
+    return build_git(get_settings(), key)

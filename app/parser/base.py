@@ -15,6 +15,10 @@ from app.domain.schemas import Symbol
 # 语言扩展名 -> 语言名
 _EXT_MAP = {
     ".java": "java",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
+    ".scala": "scala",
+    ".sc": "scala",
     ".py": "python",
     ".ts": "typescript",
     ".tsx": "typescript",
@@ -266,6 +270,8 @@ def detect_change_types(path: str, lines: list[LineChange], lang_parser: Languag
 
 _COMMENT_PREFIX = {
     "java": ("//", "/*"),
+    "kotlin": ("//", "/*"),
+    "scala": ("//", "/*"),
     "python": ("#",),
     "typescript": ("//", "/*"),
     "go": ("//", "/*"),

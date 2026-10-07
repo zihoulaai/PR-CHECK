@@ -149,10 +149,14 @@ class KBHit(BaseModel):
 class ReportMeta(BaseModel):
     pr_id: int = 0
     project: str = ""
+    # 稳定报告标识（R2）：project-branch-diffhash；供 feedback / metrics 引用。
+    report_id: str = ""
     generated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     model: str = ""
     analysis_mode: AnalysisMode = AnalysisMode.FULL
     kb_status: KbStatus = KbStatus.NOT_CONFIGURED
+    # 本次 LLM 综合是否命中缓存（R3）；summary_only / 未启用缓存时恒为 False。
+    cache_hit: bool = False
 
 
 class DocCheckItem(BaseModel):

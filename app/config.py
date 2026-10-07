@@ -106,6 +106,16 @@ KB_BASE_URL=
 KB_API_KEY=
 KB_INDEX=
 
+# ===== Git 平台（可选；默认 local） =====
+# GIT_PLATFORM：local（默认，直连本地 .git，无需 Token）/ github / gitlab。
+# github / gitlab 为只读拉取，用于 CI 中对齐真实 MR/PR（需 GIT_TOKEN）：
+# 元数据与 diff 从平台 API 取，报告 note_body 与真实 MR 编号/标题一致。
+# GIT_BASE_URL 留空用官方默认（https://api.github.com 或 https://gitlab.com/api/v4）；
+# 企业版 / 自建填写对应 API 基址，如 https://git.mycorp.com/api/v3。
+GIT_PLATFORM=local
+GIT_BASE_URL=
+GIT_TOKEN=
+
 # ===== 可配置阈值（可选，留空用默认值） =====
 SMALL_MAX_FILES=20
 SMALL_MAX_LINES=800
@@ -113,9 +123,14 @@ MEDIUM_MAX_FILES=80
 MEDIUM_MAX_LINES=3000
 KB_TOP_K=5
 
-# ===== 调试（shell 环境变量，不写入本文件由 Settings 读取） =====
+# ===== 调试与运行开关（shell 环境变量，不写入本文件由 Settings 读取） =====
 # PR_CHECK_DEBUG=1（true/yes/on 亦可）：pr_check logger 输出 DEBUG 日志到 stderr，
 # 用于排查降级原因（KB 失败、stale 过滤跳过）与适配器异常类型；不影响 stdout 结构化输出。
+# PR_CHECK_CACHE=1（true/yes/on 亦可）：启用 LLM 结果缓存（R3）——同一变更（diff/model/
+# prompt 版本/KB 命中集一致）不重复调用 LLM；默认关闭。缓存键任一要素变化即失效，
+# 命中的报告仍会重跑 Evidence 校验。清空用 `pr-check cache clear`。
+# PR_CHECK_FEEDBACK=0（false/no/off 亦可）：关闭闸门事件自动采集（R2）。默认开启，
+# 仅落本地 SQLite（不含报告原文），供 `pr-check metrics` 统计；关闭后 feedback/metrics 停用。
 """
 
 
@@ -168,6 +183,11 @@ class Settings(BaseSettings):
 
     # KB（D8）
     kb_top_k: int = 5
+
+    # Git 平台（R4）：local（默认）/ github / gitlab。远端平台只读拉取 MR 元数据与 diff。
+    git_platform: str = "local"
+    git_base_url: str | None = None
+    git_token: str | None = None
 
     @model_validator(mode="after")
     def _prod_requires_credentials(self) -> "Settings":

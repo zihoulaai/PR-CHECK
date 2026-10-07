@@ -92,10 +92,14 @@ class DocType(str, Enum):
 class Platform(str, Enum):
     """Git 数据源路由键。
 
-    当前仅支持 ``local``：直连本地仓库 ``.git``，无需 Token（读取 diff 与元数据）。
+    - ``local``：直连本地仓库 ``.git``，无需 Token（读 diff + 元数据）。
+    - ``github`` / ``gitlab``：远端平台只读 API 拉取（需 Token），用于 CI 中
+      对齐真实 MR/PR 元数据（R4，见 app/adapters/github.py / gitlab.py）。
     """
 
-    LOCAL = "local"  # 直连本地仓库 .git，无需 Token（读 diff + 元数据）
+    LOCAL = "local"    # 直连本地仓库 .git，无需 Token（读 diff + 元数据）
+    GITHUB = "github"  # GitHub REST API（只读，需 Token）
+    GITLAB = "gitlab"  # GitLab REST API（只读，需 Token）
 
 
 class MrState(str, Enum):

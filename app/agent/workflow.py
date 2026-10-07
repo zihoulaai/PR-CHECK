@@ -32,7 +32,7 @@ logger = logging.getLogger("pr_check")
 
 def run_check(cred: GitCredential, mr_ref: MRRef) -> CheckReport:
     container = get_container()
-    # 选择本地 Git 适配器（直连 .git，无需 Token）
+    # 按 cred.platform 选择 Git 适配器（local 直连 .git / github / gitlab 只读 API）
     git = select_git_adapter(cred.platform)
 
     # 1) Git 获取（失败即终止，不进入 Agent）
@@ -73,27 +73,44 @@ def run_check_from_diff(
 
 def _analyze(container, pr: PRMetadata, profile, parsed: list[ParsedFile],
              diff_text: str) -> CheckReport:
-    """KB 检索 → LLM 综合 → Evidence 校验 → CheckReport（run_check 的唯一实现）。
+    """KB 检索 → [缓存] → LLM 综合 → Evidence 校验 → CheckReport（唯一实现）。
 
     降级契约集中在本函数，避免两个入口的策略分叉：
     - KB 失败（含适配器未预料的异常）→ kb_status=FAILED，报告无知识段落；
     - LLM 未配置或规模超限 → summary_only 基础报告；
     - LLM 已配置但输出不合契约 → 抛 LlmInvalidOutput（退出码 5），不返回半成品。
+
+    缓存（R3，默认关闭）：仅对 LLM 综合路径生效；命中即复用，且**仍走
+    sanitize_report**——证据校验不可被缓存绕过。
     """
+    from app.storage.cache import cache_enabled, get_cached, make_cache_key, put_cached
+
     mode = profile.analysis_mode
+    report_id = compute_report_id(pr, diff_text)
 
     # 1) 知识库单次检索（失败降级为基础自检）
     kb_hits, kb_status = _search_kb(container, pr, profile, mode)
+    valid_refs = {h.id for h in kb_hits}
 
     # 2) LLM 综合（summary_only 或 LLM 未配置时，降级为基础风险报告）
     effective_mode = mode
     if mode != AnalysisMode.SUMMARY_ONLY and container.llm is None:
         effective_mode = AnalysisMode.SUMMARY_ONLY
 
+    cache_key = ""
+    if effective_mode != AnalysisMode.SUMMARY_ONLY and cache_enabled():
+        cache_key = make_cache_key(
+            diff_text, getattr(container.llm, "model", "") or "", valid_refs)
+        cached = get_cached(cache_key)
+        if cached is not None:
+            cached.meta.cache_hit = True
+            return sanitize_report(cached, valid_refs=valid_refs)
+
     if effective_mode == AnalysisMode.SUMMARY_ONLY:
         report = _build_summary_only(
             pr, profile, kb_status, mode=effective_mode,
             degraded_no_llm=(mode != AnalysisMode.SUMMARY_ONLY),
+            report_id=report_id,
         )
     else:
         diff_for_llm = diff_text if mode == AnalysisMode.FULL \
@@ -102,10 +119,32 @@ def _analyze(container, pr: PRMetadata, profile, parsed: list[ParsedFile],
         user = build_user_prompt(pr, profile, diff_for_llm, kb_hits, mode)
         raw = container.llm.complete(system, user)
         sections = _parse_sections(raw)
-        report = _assemble(pr, profile, sections, kb_hits, mode, kb_status)
+        report = _assemble(pr, profile, sections, kb_hits, mode, kb_status,
+                           report_id=report_id)
+        # 缓存「LLM 综合结果」（未 sanitize 的组装版）；读取时再校验证据。
+        if cache_key:
+            put_cached(cache_key, report,
+                       getattr(container.llm, "model", "") or "", pr.project)
 
     # 3) Evidence 后校验：valid_refs 取本次真实命中的 id，杜绝伪造引用
-    return sanitize_report(report, valid_refs={h.id for h in kb_hits})
+    return sanitize_report(report, valid_refs=valid_refs)
+
+
+def compute_report_id(pr: PRMetadata, diff_text: str) -> str:
+    """稳定报告标识（R2）：project-branch-diffhash。
+
+    同一变更（相同 diff + 分支 + 项目）重复自检得到相同 id，供 feedback / metrics
+    引用；diff 一变即换新 id，避免反馈串到别的变更上。
+    """
+    import hashlib
+
+    scope = (pr.project or pr.repository or "unknown").strip()
+    branch = (pr.source_branch or "diff").strip() or "diff"
+    digest = hashlib.sha256(
+        f"{scope}|{branch}|{pr.pr_id}|{diff_text}".encode("utf-8")
+    ).hexdigest()[:12]
+    slug = lambda s: s.replace("/", "-").replace("\\", "-").replace(" ", "-")  # noqa: E731
+    return f"{slug(scope)}-{slug(branch)}-{digest}"
 
 
 def _search_kb(container, pr: PRMetadata, profile, mode: AnalysisMode):
@@ -176,7 +215,8 @@ def _brief(exc: PydanticValidationError) -> str:
     return "; ".join(parts)
 
 
-def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status) -> CheckReport:
+def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status,
+              *, report_id: str = "") -> CheckReport:
     hit_map = {h.id: h for h in kb_hits}
 
     # 无知识命中（未配置 / 空 / 检索失败）时，项目规范与技术债务段落必须为空，
@@ -201,7 +241,7 @@ def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status) -
                     ))
 
     return CheckReport(
-        meta=_meta(pr, profile, mode, kb_status),
+        meta=_meta(pr, profile, mode, kb_status, report_id=report_id),
         summary=sections.summary,
         doc_check=list(sections.doc_check), risk=list(sections.risk),
         project_rules=[] if no_kb else list(sections.project_rules),
@@ -212,7 +252,8 @@ def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status) -
 
 
 def _build_summary_only(pr, profile, kb_status, *, mode: AnalysisMode | None = None,
-                        degraded_no_llm: bool = False) -> CheckReport:
+                        degraded_no_llm: bool = False,
+                        report_id: str = "") -> CheckReport:
     """无可分析内容 / Large PR / LLM 未配置：仅变更摘要 + 基础风险 + 人工 Checklist。
 
     degraded_no_llm=True 表示本应深度分析但因 LLM 未配置而降级，摘要会注明原因。
@@ -231,7 +272,8 @@ def _build_summary_only(pr, profile, kb_status, *, mode: AnalysisMode | None = N
                 evidence_level=EvidenceLevel.C, source_refs=[],
             ))
     return CheckReport(
-        meta=_meta(pr, profile, mode or AnalysisMode.SUMMARY_ONLY, kb_status),
+        meta=_meta(pr, profile, mode or AnalysisMode.SUMMARY_ONLY, kb_status,
+                   report_id=report_id),
         summary=_summary_from_profile(pr, profile, degraded_no_llm=degraded_no_llm),
         doc_check=[], risk=risks, project_rules=[], tech_debt=[],
         manual_checklist=build_checklist(profile),
@@ -257,13 +299,14 @@ def _summary_from_profile(pr, profile, *, degraded_no_llm: bool = False) -> str:
     return "".join(parts)
 
 
-def _meta(pr, profile, mode, kb_status) -> ReportMeta:
+def _meta(pr, profile, mode, kb_status, *, report_id: str = "") -> ReportMeta:
     model = ""
     llm = get_container().llm
     if llm is not None:
         model = getattr(llm, "model", "") or ""
     return ReportMeta(
         pr_id=pr.pr_id, project=pr.project or pr.repository,
+        report_id=report_id,
         model=model, analysis_mode=mode, kb_status=kb_status,
     )
 

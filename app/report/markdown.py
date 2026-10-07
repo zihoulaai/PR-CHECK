@@ -147,12 +147,21 @@ def _section_sources(report: CheckReport) -> str:
 
 
 def render_markdown(report: CheckReport) -> str:
+    meta_bits = [
+        f"分析模式：{report.meta.analysis_mode.value}",
+        f"知识库状态：{report.meta.kb_status.value}",
+    ]
+    if report.meta.cache_hit:
+        meta_bits.append("缓存：命中")
+    if report.meta.report_id:
+        meta_bits.append(f"报告标识：`{report.meta.report_id}`")
+
     parts = [
         "# PR 提交前置自检报告",
         "",
         "> 本报告用于 PR 提交前辅助自检。不代表正式 Code Review，也不代表代码不存在 Bug。",
         "",
-        f"> 分析模式：{report.meta.analysis_mode.value} ｜ 知识库状态：{report.meta.kb_status.value}",
+        "> " + " ｜ ".join(meta_bits),
         "",
         "## 1. 变更摘要",
         report.summary or "（无摘要）",

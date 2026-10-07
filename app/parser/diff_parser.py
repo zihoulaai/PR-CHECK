@@ -28,11 +28,15 @@ from app.parser.base import (
 )
 from app.parser.go import GoParser
 from app.parser.java import JavaParser
+from app.parser.kotlin import KotlinParser
 from app.parser.python import PythonParser
+from app.parser.scala import ScalaParser
 from app.parser.typescript import TypeScriptParser
 
 _REGISTRY: dict[str, LanguageParser] = {
     "java": JavaParser(),
+    "kotlin": KotlinParser(),
+    "scala": ScalaParser(),
     "python": PythonParser(),
     "typescript": TypeScriptParser(),
     "go": GoParser(),

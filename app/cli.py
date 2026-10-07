@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -168,12 +169,54 @@ def _emit_ci_payload(args: argparse.Namespace, report, violations: list, fail_on
     return rc
 
 
+def _run_remote_check(args: argparse.Namespace, platform: str, project: str):
+    """远端平台（github/gitlab）只读自检：从平台 API 取 MR 元数据 + diff（R4）。
+
+    参数优先级：CLI --git-base-url/--git-token > 配置 GIT_BASE_URL/GIT_TOKEN。
+    --repo 为项目路径，--mr 为 MR/PR 编号（缺一即 INVALID_REQUEST，退出码 2）。
+    """
+    from app.config import get_settings
+
+    repo = getattr(args, "repo", None)
+    if not repo:
+        raise ValidationError(
+            f"platform={platform} 需要 --repo 指定项目路径（owner/repo 或 group/project）。")
+    mr_number = getattr(args, "mr", None)
+    if not mr_number:
+        raise ValidationError(f"platform={platform} 需要 --mr 指定 MR/PR 编号。")
+
+    try:
+        s = get_settings()
+    except NotConfiguredError:
+        s = None
+    cred = GitCredential(
+        base_url=(getattr(args, "git_base_url", None)
+                  or (s.git_base_url if s else "") or ""),
+        token=(getattr(args, "git_token", None) or (s.git_token if s else "") or ""),
+        platform=platform,
+    )
+    mr_ref = MRRef(project=ProjectRef(path=project or repo), iid=int(mr_number))
+    return run_check(cred, mr_ref)
+
+
 def cmd_check(args: argparse.Namespace) -> int:
+    effective_project = args.project
+    platform = (getattr(args, "platform", None) or Platform.LOCAL.value).strip().lower()
+
+    # --fake 只注入 LLM/KB 的离线替代，远端平台仍会发真实 API 请求：
+    # 显式拒绝该组合，避免"离线演示"意外产生真实网络调用（R4 审查问题1）。
+    # 先于 _maybe_enable_fake：被拒绝时不留 PR_CHECK_USE_FAKE 进程内副作用。
+    if getattr(args, "fake", False) and platform != Platform.LOCAL.value:
+        raise ValidationError(
+            f"--fake 不支持远端平台（platform={platform}）：离线演示请用 "
+            f"--diff 或本地 --repo；远端只读拉取需真实 Token。")
+
     _maybe_enable_fake(args.fake)
 
-    effective_project = args.project
-
-    if getattr(args, "repo", None):
+    if platform != Platform.LOCAL.value:
+        # 远端只读平台（R4）：--repo 为项目路径（owner/repo），--mr 为 MR/PR 编号
+        report = _run_remote_check(args, platform, effective_project)
+    elif getattr(args, "repo", None):
         # 本地仓库直连：读 .git 取 diff + 元数据，无需 Token
         cred = GitCredential(base_url=args.repo, token="", platform=Platform.LOCAL.value)
         project = ProjectRef(path=effective_project or args.repo)
@@ -203,6 +246,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         except ValueError as exc:
             raise ValidationError(str(exc))
         violations = evaluate_gate(report, specs)
+        # R2：记录闸门事件供 metrics 统计（默认开启，失败不影响自检）
+        _record_gate_event(report, args.fail_on, violations)
     else:
         violations = []
 
@@ -414,9 +459,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--source-branch", help="源分支（diff 模式）。")
     p_check.add_argument("--target-branch", help="目标分支（diff 模式）。")
     p_check.add_argument("--author", help="作者（diff 模式）。")
-    p_check.add_argument("--repo", help="本地仓库路径（直连 .git，无需 Token）。")
+    p_check.add_argument("--repo", help="本地仓库路径（platform=local 直连 .git）；"
+                                        "platform=github/gitlab 时为项目路径（owner/repo 或 group/project）。")
     p_check.add_argument("--base", help="本地模式目标分支（默认 main），用于计算 diff。")
     p_check.add_argument("--source", help="本地模式源引用（默认 HEAD，即当前分支提交）。")
+    p_check.add_argument("--platform", choices=[p.value for p in Platform], default=None,
+                         help="Git 数据源：local（默认，直连 .git）/ github / gitlab（只读 API，需 GIT_TOKEN）。")
+    p_check.add_argument("--mr", type=int, metavar="NUMBER",
+                         help="远端平台 MR/PR 编号（platform=github/gitlab 时必填）。")
+    p_check.add_argument("--git-base-url", dest="git_base_url", metavar="URL",
+                         help="远端平台 API 基址（默认官方；企业版/自建填 https://<host>/api/v3 等）。")
+    p_check.add_argument("--git-token", dest="git_token",
+                         help="远端平台访问 Token（覆盖 GIT_TOKEN 配置）。")
     p_check.add_argument("--fake", action="store_true", help="使用离线 Fake 适配器。")
     p_check.add_argument("--format", choices=["json", "md", "text"], default="json",
                          help="输出格式：json（默认，结构化）/ md（Markdown）/ text（纯文本，终端直读无需渲染器）。")
@@ -461,6 +515,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="init 允许覆盖已存在的目标文件（默认拒绝，防止误冲掉已填好的凭据）。",
     )
 
+    # feedback / metrics（R2：反馈采集与度量，本地记录）
+    p_feedback = sub.add_parser(
+        "feedback", help="对自检报告条目标记误报/有用（本地记录，供 metrics 统计）。")
+    p_feedback.add_argument("--report-id", required=True, dest="report_id",
+                            help="报告 meta.report_id（check 输出 / 报告 meta 中可见）。")
+    p_feedback.add_argument("--item", required=True,
+                            help="条目引用，格式 <section>:<index>，如 risk:0 / project_rules:1。")
+    p_feedback.add_argument("--label", required=True, choices=["fp", "useful"],
+                            help="fp=误报；useful=有用。")
+    p_feedback.add_argument("--note", default="", help="备注（可选）。")
+    p_feedback.add_argument("--project", default="",
+                            help="项目（可选；用于 metrics --project 过滤）。")
+
+    p_metrics = sub.add_parser(
+        "metrics", help="统计反馈：误报率/有用率与闸门命中/驳回次数。")
+    p_metrics.add_argument("--project", help="按项目过滤。")
+    p_metrics.add_argument("--since", help="只统计该 ISO 时间（含）之后的记录。")
+
+    # cache（R3：LLM 结果缓存管理）
+    p_cache = sub.add_parser("cache", help="管理 LLM 结果缓存（R3，默认关闭）。")
+    cache_sub = p_cache.add_subparsers(dest="cache_action", required=True)
+    p_cache_clear = cache_sub.add_parser("clear", help="清空缓存（可按 --project 限定）。")
+    p_cache_clear.add_argument("--project", help="只清该项目缓存。")
+
     # kb（知识库文档管理，替代原 Web /kb/docs）
     p_kb = sub.add_parser("kb", help="管理知识库文档。")
     kb_sub = p_kb.add_subparsers(dest="kb_action", required=True)
@@ -486,6 +564,17 @@ def build_parser() -> argparse.ArgumentParser:
                              help="把本批未覆盖的既有 active 文档标记为 stale（过期），不再参与检索")
     p_kb_del = kb_sub.add_parser("delete", help="删除知识文档（向量库与本地元数据一并删除）。")
     p_kb_del.add_argument("--id", required=True, dest="doc_id", help="文档 id（kb list 输出）")
+    p_kb_suggest = kb_sub.add_parser(
+        "suggest", help="按当前变更画像建议需关注/需补录的知识文档（只读，不写入）。")
+    p_kb_suggest.add_argument("--repo", default=".", help="本地仓库路径（默认当前目录）。")
+    p_kb_suggest.add_argument("--base", default="main", help="目标分支（默认 main）。")
+    p_kb_suggest.add_argument("--source", default="HEAD", help="源引用（默认 HEAD）。")
+    p_kb_suggest.add_argument("--project", required=True,
+                              help="项目（KB 文档按项目隔离，必填）。")
+    p_kb_verify = kb_sub.add_parser(
+        "verify", help="校验知识文档与代码是否漂移（只读，确定性符号匹配）。")
+    p_kb_verify.add_argument("--repo", default=".", help="本地仓库路径（默认当前目录）。")
+    p_kb_verify.add_argument("--project", help="只校验该项目（默认全部）。")
 
     # hook（git 钩子安装/卸载，配合 --fail-on 闸门实现推送拦截）
     p_hook = sub.add_parser("hook", help="管理 git 钩子（pre-push 拦截）。")
@@ -523,6 +612,12 @@ def _kb_upload_one(kb, project: str, module: str, doc_type: str, title: str,
 
 def cmd_kb(args: argparse.Namespace) -> int:
     action = getattr(args, "kb_action", None)
+    # suggest / verify 只读本地元数据与仓库（不触向量库）→ 先于 kb is None 检查，
+    # 使未配置 KB 凭据时也能做知识覆盖体检。
+    if action == "suggest":
+        return _kb_suggest(args)
+    if action == "verify":
+        return _kb_verify(args)
     kb = get_container().kb
     if kb is None:
         raise NotConfiguredError("知识库未配置（请设置 KB_BASE_URL / KB_API_KEY / KB_INDEX）。")
@@ -619,6 +714,155 @@ def _kb_import(kb, args: argparse.Namespace) -> int:
         f"失败 {len(failed)}，标记过期 {len(marked_stale)}\n"
     )
     return EXIT_OK if not failed else EXIT_KB
+
+
+# ===== KB 生命周期闭环（R1，只读） =====
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{3,}")
+_BACKTICK_RE = re.compile(r"`([^`]+)`")
+# 扫描仓库时跳过的目录（构建产物 / 依赖 / VCS 元数据）
+_SKIP_DIRS = {
+    ".git", "node_modules", ".venv", "venv", "dist", "build", "__pycache__",
+    ".mypy_cache", ".pytest_cache", "target", "out", ".idea", ".vscode",
+}
+_MAX_FILE_BYTES = 512 * 1024
+_MAX_TOTAL_BYTES = 20 * 1024 * 1024
+_TOKEN_STOPWORDS = {
+    "the", "and", "for", "with", "this", "that", "from", "must", "should",
+    "when", "have", "will", "not", "are", "was", "were", "does", "http",
+    "https", "true", "false", "null", "none",
+}
+
+
+def _read_repo_diff(repo: str, base: str, source: str) -> str:
+    """复用本地 Git 适配器读 diff（不发起网络请求）。"""
+    from app.adapters.base import GitCredential
+    from app.adapters.local_git import LocalGitAdapter
+    from app.domain.schemas import MRRef, ProjectRef
+
+    cred = GitCredential(base_url=repo, token="", platform=Platform.LOCAL.value)
+    ref = MRRef(project=ProjectRef(path=repo), iid=0,
+                base_branch=base, source_ref=source)
+    return LocalGitAdapter().get_diff(cred, ref)
+
+
+def _repo_identifiers(repo: str) -> set[str]:
+    """单次遍历仓库收集标识符集合（确定性、可复现；跳过依赖与产物目录）。"""
+    found: set[str] = set()
+    total = 0
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                if os.path.getsize(path) > _MAX_FILE_BYTES:
+                    continue
+                data = Path(path).read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            total += len(data)
+            found.update(_IDENT_RE.findall(data))
+            if total > _MAX_TOTAL_BYTES:
+                return found
+    return found
+
+
+def _doc_tokens(text: str) -> list[str]:
+    """从文档标题+摘要抽取候选符号：反引号内的整体 + ASCII 标识符（去停用词）。"""
+    candidates: list[str] = []
+    for span in _BACKTICK_RE.findall(text):
+        candidates.extend(_IDENT_RE.findall(span))
+    candidates.extend(_IDENT_RE.findall(text))
+    out: list[str] = []
+    for tok in candidates:
+        if tok.lower() in _TOKEN_STOPWORDS:
+            continue
+        if tok.islower() and len(tok) < 5:
+            continue
+        if tok not in out:
+            out.append(tok)
+    return out[:30]
+
+
+def _kb_suggest(args: argparse.Namespace) -> int:
+    """按当前变更画像反查需关注 / 需补录的知识文档（只建议，不写入）。"""
+    from app.domain.schemas import PRMetadata
+    from app.parser.change_profile import build_change_profile
+    from app.parser.diff_parser import parse_diff
+    from app.storage.repo import list_kb_docs
+
+    repo = args.repo
+    if not Path(repo).is_dir():
+        raise ValidationError(f"仓库路径不存在：{repo}")
+    diff = _read_repo_diff(repo, args.base, args.source)
+    profile = build_change_profile(PRMetadata(), parse_diff(diff))
+
+    docs = list_kb_docs(project=args.project, status="active")
+    changed_modules = {m for m in profile.modules if m}
+    symbols = {s.name for s in profile.symbols if s.name}
+    keywords = {k for k in profile.keywords if k}
+
+    affected: list[dict] = []
+    covered_modules: set[str] = set()
+    for d in docs:
+        haystack = f"{d.title} {d.snippet}"
+        reasons: list[str] = []
+        if d.module and d.module in changed_modules:
+            reasons.append("module")
+        if any(s in haystack for s in symbols):
+            reasons.append("symbol")
+        if any(k.lower() in haystack.lower() for k in keywords):
+            reasons.append("keyword")
+        if reasons:
+            covered_modules.add(d.module)
+            affected.append({"id": d.id, "title": d.title, "module": d.module,
+                             "doc_type": d.doc_type, "matched_by": reasons})
+
+    gaps = sorted(m for m in changed_modules if m not in covered_modules)
+    _emit({
+        "project": args.project, "repo": repo,
+        "changed_modules": sorted(changed_modules),
+        "affected_docs": affected, "coverage_gaps": gaps,
+        "note": "只建议不写入：请人工确认后 kb upload 补录或更新对应文档。",
+    }, args)
+    return EXIT_OK
+
+
+def _kb_verify(args: argparse.Namespace) -> int:
+    """校验知识文档与代码是否漂移（只读，确定性符号匹配，非语义比对）。"""
+    repo = args.repo
+    if not Path(repo).is_dir():
+        raise ValidationError(f"仓库路径不存在：{repo}")
+    from app.storage.repo import list_kb_docs
+
+    docs = [d for d in list_kb_docs(project=getattr(args, "project", None), status="active")
+            if d.doc_type in ("api_document", "development_rule")]
+    if not docs:
+        _emit({"repo": repo, "checked": 0, "stale_suspects": [], "drift_suspects": [],
+               "note": "无可校验的 api_document / development_rule 文档。"}, args)
+        return EXIT_OK
+
+    present = _repo_identifiers(repo)
+    stale: list[dict] = []
+    drift: list[dict] = []
+    for d in docs:
+        tokens = _doc_tokens(f"{d.title} {d.snippet}")
+        if not tokens:
+            continue
+        missing = [t for t in tokens if t not in present]
+        matched = len(tokens) - len(missing)
+        rec = {"id": d.id, "title": d.title, "module": d.module, "doc_type": d.doc_type,
+               "matched": matched, "total": len(tokens), "missing": missing[:10]}
+        if matched == 0:
+            stale.append(rec)
+        elif missing:
+            drift.append(rec)
+
+    _emit({
+        "repo": repo, "checked": len(docs), "scanned_identifiers": len(present),
+        "stale_suspects": stale, "drift_suspects": drift,
+        "note": "确定性符号匹配（非语义比对）：仅提示人工复核，不自动改动知识库。",
+    }, args)
+    return EXIT_OK
 
 
 # ===== hook 子命令（git 钩子安装/卸载） =====
@@ -763,6 +1007,156 @@ def cmd_hook(args: argparse.Namespace) -> int:
     raise ValidationError(f"未知 hook 动作：{action}")
 
 
+# ===== 反馈与度量（R2） =====
+_TRUTHY_VALUES = {"1", "true", "yes", "on"}
+_FALSY_VALUES = {"0", "false", "no", "off"}
+
+# 可反馈的报告段（与 CheckReport 段落对应）
+_FEEDBACK_SECTIONS = {"doc_check", "risk", "project_rules", "tech_debt", "manual_checklist"}
+
+
+def _feedback_enabled() -> bool:
+    """PR_CHECK_FEEDBACK=0/off 时关闭采集（默认开启，数据仅落本地 SQLite）。"""
+    return os.getenv("PR_CHECK_FEEDBACK", "").strip().lower() not in _FALSY_VALUES
+
+
+def _parse_item_ref(ref: str) -> tuple[str, int]:
+    """解析 --item <section>:<index>；非法即 INVALID_REQUEST（rc 2）。"""
+    section, sep, idx = ref.rpartition(":")
+    section = section.strip()
+    if not sep or section not in _FEEDBACK_SECTIONS:
+        raise ValidationError(
+            f"非法的 --item：{ref!r}（应为 <section>:<index>，"
+            f"section 可选：{', '.join(sorted(_FEEDBACK_SECTIONS))}）。")
+    try:
+        index = int(idx)
+    except ValueError:
+        raise ValidationError(f"非法的条目序号：{idx!r}（应为非负整数）。")
+    if index < 0:
+        raise ValidationError(f"非法的条目序号：{index}（应为非负整数）。")
+    return section, index
+
+
+def _hash_key(*parts: str, n: int = 16) -> str:
+    import hashlib
+
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:n]
+
+
+def _record_gate_event(report, fail_on: list[str], violations: list[str]) -> None:
+    """带 --fail-on 的 check 记一条闸门事件（R2）。
+
+    采集关闭或库异常时静默跳过——统计失败绝不影响自检主流程。
+    """
+    if not _feedback_enabled():
+        return
+    try:
+        from app.domain.models import GateEvent
+        from app.storage.repo import record_gate_event
+
+        specs = " ".join(fail_on)
+        rid = report.meta.report_id or ""
+        record_gate_event(GateEvent(
+            id=_hash_key(rid, specs, n=20), report_id=rid,
+            project=report.meta.project or "", specs=specs,
+            blocked=bool(violations),
+        ))
+    except Exception as exc:  # noqa: BLE001 - 统计失败不影响自检
+        import logging
+
+        logging.getLogger("pr_check").warning(
+            "gate_event_record_failed type=%s", type(exc).__name__)
+
+
+def cmd_feedback(args: argparse.Namespace) -> int:
+    """对报告条目标记 fp/useful；id 由 (report_id, section, item_key) 派生 → 幂等覆盖。"""
+    if not _feedback_enabled():
+        raise ValidationError(
+            "反馈采集已被 PR_CHECK_FEEDBACK 关闭（设为 1/true/on 可恢复）。")
+    section, index = _parse_item_ref(args.item)
+    item_key = _hash_key(section, str(index))
+    from app.domain.models import ReportFeedback
+    from app.storage.repo import upsert_feedback
+
+    upsert_feedback(ReportFeedback(
+        id=_hash_key(args.report_id, section, item_key, n=20),
+        report_id=args.report_id, project=args.project or "",
+        section=section, item_key=item_key, label=args.label,
+        note=args.note or "",
+    ))
+    _emit({"report_id": args.report_id, "section": section, "item": args.item,
+           "label": args.label, "recorded": True}, args)
+    return EXIT_OK
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    """统计反馈（误报率 / 有用率 / 按段分布）与闸门命中/驳回。
+
+    口径（显式声明，避免误读）：
+    - 反馈是「条目级」计数；rate 的分母是反馈条目总数。
+    - 闸门 hit 是「被该规则拦下的不同报告数」（同报告重复 check 不虚增）；
+    - 驳回 = 被拦下且该报告收到过 fp 反馈（报告级近似，非按规则精确归因）。
+    """
+    from app.storage.repo import list_feedback, list_gate_events
+
+    fb = list_feedback(project=args.project, since=args.since)
+    ge = list_gate_events(project=args.project, since=args.since)
+
+    total = len(fb)
+    fp = sum(1 for r in fb if r.label == "fp")
+    useful = sum(1 for r in fb if r.label == "useful")
+    by_section: dict[str, dict[str, int]] = {}
+    for r in fb:
+        bucket = by_section.setdefault(r.section, {"fp": 0, "useful": 0})
+        bucket["fp" if r.label == "fp" else "useful"] += 1
+
+    fp_report_ids = {r.report_id for r in fb if r.label == "fp"}
+    by_rule: dict[str, dict[str, int]] = {}
+    blocked = 0
+    for e in ge:
+        if e.blocked:
+            blocked += 1
+        for spec in e.specs.split():
+            b = by_rule.setdefault(spec, {"hit": 0, "rejected": 0})
+            if e.blocked:
+                b["hit"] += 1
+                if e.report_id in fp_report_ids:
+                    b["rejected"] += 1
+
+    payload = {
+        "project": args.project or None,
+        "since": args.since or None,
+        "data_available": bool(fb or ge),
+        "feedback": {
+            "total": total, "false_positive": fp, "useful": useful,
+            "false_positive_rate": round(fp / total, 4) if total else None,
+            "useful_rate": round(useful / total, 4) if total else None,
+            "by_section": by_section,
+        },
+        "gate": {
+            "evaluated_reports": len(ge), "blocked_reports": blocked,
+            "by_rule": by_rule,
+        },
+    }
+    if not (fb or ge):
+        payload["note"] = (
+            "暂无反馈数据。使用 `pr-check feedback --report-id <id> "
+            "--item <section:index> --label fp|useful` 记录。")
+    _emit(payload, args)
+    return EXIT_OK
+
+
+def cmd_cache(args: argparse.Namespace) -> int:
+    """cache clear：清空 LLM 结果缓存（R3）。"""
+    if getattr(args, "cache_action", None) != "clear":
+        raise ValidationError(f"未知 cache 动作：{getattr(args, 'cache_action', None)}")
+    from app.storage.repo import clear_cache
+
+    removed = clear_cache(args.project)
+    _emit({"cleared": removed, "project": args.project or None}, args)
+    return EXIT_OK
+
+
 _DEBUG_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -803,6 +1197,9 @@ def main(argv: list[str] | None = None) -> int:
             "hook": cmd_hook,
             "config": cmd_config,
             "completions": cmd_completions,
+            "feedback": cmd_feedback,
+            "metrics": cmd_metrics,
+            "cache": cmd_cache,
         }[args.command]
         return handler(args)
     except AppError as exc:
