@@ -45,6 +45,7 @@ from app.domain.enums import DocType, Platform
 from app.domain.schemas import MRRef, ProjectRef
 from app.errors import AppError, NotConfiguredError, ValidationError
 from app.report.markdown import render_markdown
+from app.report.plain import render_plain
 
 VERSION = "1.0.0"
 
@@ -106,10 +107,10 @@ def _maybe_enable_fake(fake: bool) -> None:
 
 
 def _emit(payload, args: argparse.Namespace) -> None:
-    """输出结果：json（默认）或 md（Markdown 字符串）。"""
+    """输出结果：json（默认）/ md（Markdown）/ text（纯文本）。"""
     fmt = getattr(args, "format", "json")
-    if fmt == "md":
-        # payload 约定为 (report, markdown) 或纯字符串
+    if fmt in ("md", "text"):
+        # payload 约定为 (report, 渲染文本) 或纯字符串
         if isinstance(payload, tuple):
             print(payload[1])
         else:
@@ -211,6 +212,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     if args.format == "md":
         _emit((None, render_markdown(report)), args)
+    elif args.format == "text":
+        _emit((None, render_plain(report)), args)
     else:
         _emit(report.model_dump(mode="json"), args)
 
@@ -415,7 +418,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--base", help="本地模式目标分支（默认 main），用于计算 diff。")
     p_check.add_argument("--source", help="本地模式源引用（默认 HEAD，即当前分支提交）。")
     p_check.add_argument("--fake", action="store_true", help="使用离线 Fake 适配器。")
-    p_check.add_argument("--format", choices=["json", "md"], default="json")
+    p_check.add_argument("--format", choices=["json", "md", "text"], default="json",
+                         help="输出格式：json（默认，结构化）/ md（Markdown）/ text（纯文本，终端直读无需渲染器）。")
     p_check.add_argument("--pretty", action="store_true", help="JSON 缩进美化。")
     p_check.add_argument(
         "--fail-on", action="append", metavar="SPEC",

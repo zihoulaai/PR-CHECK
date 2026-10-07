@@ -5,11 +5,12 @@
 """
 from __future__ import annotations
 
-from app.domain.enums import (DocCheckVerdict, EvidenceLevel, RuleVerdict,
-                              TechDebtVerdict)
-from app.domain.schemas import (CheckReport, DocCheckItem, ReportMeta, RuleItem,
-                                TechDebtItem)
+from app.domain.enums import (DocCheckVerdict, EvidenceLevel, RiskLevel,
+                              RuleVerdict, TechDebtVerdict)
+from app.domain.schemas import (CheckReport, DocCheckItem, ReportMeta, RiskItem,
+                                RuleItem, TechDebtItem)
 from app.report.markdown import _cell, render_markdown
+from app.report.plain import WIDTH, render_plain
 
 
 def _report(**over) -> CheckReport:
@@ -68,3 +69,59 @@ def test_empty_basis_and_advice_render_placeholder():
     ]))
     rows = [ln for ln in md.splitlines() if ln.startswith("|")]
     assert rows[-1].count("—") >= 2  # basis/advice 占位
+
+
+# ===== 纯文本渲染（无外部渲染器时的终端直读格式）=====
+
+def test_plain_renders_seven_sections_without_markdown_syntax():
+    txt = render_plain(_report(summary="变更摘要内容"))
+    for i in range(1, 8):
+        assert f"{i}. " in txt
+    assert "变更摘要内容" in txt
+    # 不含 Markdown 结构符号：标题井号、表格分隔、加粗、行内代码围栏
+    assert "##" not in txt and "---" not in txt
+    assert "**" not in txt and "`" not in txt
+
+
+def test_plain_marks_violation_and_risk_levels():
+    txt = render_plain(_report(
+        risk=[RiskItem(level=RiskLevel.HIGH, text="SQL 注入",
+                       location="a.py:10", evidence_level=EvidenceLevel.A,
+                       source_refs=["kb-1"])],
+        project_rules=[RuleItem(item="SQL 安全规范", verdict=RuleVerdict.VIOLATION,
+                                evidence_level=EvidenceLevel.B, source_refs=["kb-1"])],
+    ))
+    assert "【高风险】" in txt and "a.py:10" in txt
+    assert "✗ 发现疑似违反" in txt
+    assert "[A] 已确认" in txt and "[kb-1]" in txt
+
+
+def test_plain_flattens_multiline_free_text():
+    """LLM 自由文本含换行：压平为一行片段，不破坏列表缩进。"""
+    txt = render_plain(_report(doc_check=[
+        DocCheckItem(item="接口", verdict=DocCheckVerdict.UPDATE,
+                     basis="第一行\n第二行", advice="建议\n续行",
+                     evidence_level=EvidenceLevel.C),
+    ]))
+    assert "依据：第一行 第二行" in txt
+    assert "建议：建议 续行" in txt
+
+
+def test_plain_wraps_long_lines_within_width():
+    import unicodedata
+
+    def cols(s):
+        return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+                   for c in s)
+
+    txt = render_plain(_report(summary="字" * 200))
+    # 中文按 2 列计：折行以显示列宽为准（200 个汉字必然被切成多行）
+    body = [ln for ln in txt.splitlines() if "字" in ln]
+    assert len(body) >= 2
+    assert all(cols(ln) <= WIDTH for ln in body)
+
+
+def test_plain_empty_sections_have_human_placeholders():
+    txt = render_plain(_report())
+    assert "未识别到需要重点关注的风险" in txt
+    assert "未做项目规范初检" in txt

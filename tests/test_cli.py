@@ -57,6 +57,16 @@ def test_cli_check_md(capsys):
     assert "## 7. 知识库来源" in out
 
 
+def test_cli_check_text(capsys):
+    rc = cmd_check(_ns(format="text"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1. 变更摘要" in out
+    assert "7. 知识库来源" in out
+    # 纯文本不含 Markdown 结构符号（无渲染器也能直读）
+    assert "##" not in out and "|---" not in out
+
+
 def test_cli_version(capsys):
     rc = cmd_version(_ns())
     assert rc == 0

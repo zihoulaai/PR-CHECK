@@ -75,7 +75,7 @@ def test_candidates_prefix_filter(capsys):
 def test_candidates_choice_values(capsys):
     """选项值补全：上一个词是带 choices 的选项 → 候选即其可选值。"""
     assert main(["__complete", "check", "--format", ""]) == 0
-    assert set(capsys.readouterr().out.split()) == {"json", "md"}
+    assert set(capsys.readouterr().out.split()) == {"json", "md", "text"}
 
     assert main(["__complete", "check", "--format", "j"]) == 0
     assert capsys.readouterr().out.split() == ["json"]

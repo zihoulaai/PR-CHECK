@@ -114,11 +114,15 @@ def test_hook_install_missing_template_raises(repo, monkeypatch):
     assert main(["hook", "install", "--project", "team/order"]) == 2
 
 
-def test_hook_template_gate_and_md_output():
-    """阻断语义：仅退出码 7 拦截；基础设施故障告警放行；报告为 Markdown 且有进度行。"""
+def test_hook_template_gate_and_format_selection():
+    """阻断语义：仅退出码 7 拦截；基础设施故障告警放行；有进度行；
+    报告格式按渲染器可用性在 md（glow 着色）与内置 text（无渲染器）间选择。"""
     raw = _hook_template("pre-push").read_text(encoding="utf-8")
     assert "PRCHECK_MANAGED_HOOK=1" in raw
-    assert "--format md" in raw
+    assert 'command -v glow' in raw
+    assert 'REPORT_FMT="md"' in raw
+    assert 'REPORT_FMT="text"' in raw
+    assert '--format "$REPORT_FMT"' in raw
     assert 'RC" -eq 7' in raw
     assert "PR_CHECK_STRICT" in raw
     assert "正在自检" in raw
@@ -206,7 +210,8 @@ def test_hook_runs_check_on_branch_push(hooked_repo):
     assert argv[0] == "check"
     assert "--repo" in argv and "--base" in argv
     assert "team/order" in argv and "risk:high" in argv and "rule:violation" in argv
-    assert "--format" in argv and "md" in argv
+    # capture_output 下 stdout 为管道（非终端）：无 glow 着色条件，走内置纯文本
+    assert "--format" in argv and "text" in argv
 
 
 def test_hook_skips_deletion_push(hooked_repo):

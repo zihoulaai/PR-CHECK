@@ -66,10 +66,13 @@ fi
 
 # 调用方式：源码脚本优先（PR_CHECK_CLI 存在且有效），否则走 `python -m <MODULE>`，
 # 后者用于装机形态（uv tool install / uvx），不依赖 PATH 上是否存在 pr-check。
+# 两处都加 -P（Python 3.11+，安装时锁定的解释器必然满足）：钩子在被检仓库根运行，
+# 不带 -P 时 cwd 会被注入 sys.path 首位，若仓库根存在与包同名的 app.py（极常见），
+# `import app.cli` 会误导入用户代码并可能因缺依赖失败，导致自检被误判为工具不可用而跳过。
 if [ -n "$CLI" ] && [ -f "$CLI" ]; then
     set -- "$CLI"
-elif "$PYTHON" -c "import $MODULE" >/dev/null 2>&1; then
-    set -- -m "$MODULE"
+elif "$PYTHON" -P -c "import $MODULE" >/dev/null 2>&1; then
+    set -- -P -m "$MODULE"
 else
     echo "PR_CHECK: 当前解释器无法导入 ${MODULE}（工具已被卸载或环境已变更），跳过本次自检。" >&2
     echo "PR_CHECK: 恢复自检：在本仓库重跑 pr-check hook install。" >&2
@@ -95,10 +98,26 @@ done
 echo "PR_CHECK: 正在自检 ${BASE_REF}...HEAD 的变更（项目：${PROJECT}）..." >&2
 
 set +e
-# Markdown 输出：push 是给人看的时刻，人类优先；报告仍同时写入 stdout 便于复制
+# push 是给人看的时刻，人类优先。报告先写临时文件再展示，不能直接接管道——
+# 管道下 $? 取到的是渲染器的退出码，rc=7 的闸门判定会失效。
+TMP_REPORT="$(mktemp -t pr-check-report.XXXXXX)"
+trap 'rm -f "$TMP_REPORT"' EXIT
+# glow 存在且 stdout 为终端：出 Markdown 交 glow 着色排版；
+# 否则用内置纯文本格式（text）——无需同事安装任何渲染器也没有 Markdown 源码噪音；
+# 输出被管道/重定向（CI 抓日志）时同样走 text，不注入 ANSI 转义。
+if command -v glow >/dev/null 2>&1 && [ -t 1 ]; then
+    REPORT_FMT="md"
+else
+    REPORT_FMT="text"
+fi
 "$PYTHON" "$@" check --repo "$ROOT" --base "$BASE_REF" \
-    --project "$PROJECT" --format md $FAIL_ARGS
+    --project "$PROJECT" --format "$REPORT_FMT" $FAIL_ARGS >"$TMP_REPORT"
 RC=$?
+if [ "$REPORT_FMT" = "md" ]; then
+    glow "$TMP_REPORT"
+else
+    cat "$TMP_REPORT"
+fi
 set -e
 
 # 退出码 7 = GATE_FAILED：报告已正常生成，被人为规则拦下，必须阻断
