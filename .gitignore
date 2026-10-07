@@ -27,3 +27,4 @@ build/
 
 # Project data (not source)
 .codebuddy/
+.trae/
