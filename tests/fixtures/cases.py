@@ -17,12 +17,12 @@ def _mk(files):
         new = "/dev/null" if status == "deleted" else f"b/{path}"
         b = [f"diff --git a/{path} b/{path}", f"--- {old}", f"+++ {new}"]
         b.append(f"@@ -1,{len(ctx) + len(removed)} +1,{len(ctx) + len(added)} @@")
-        for l in ctx:
-            b.append(f" {l}")
-        for l in added:
-            b.append(f"+{l}")
-        for l in removed:
-            b.append(f"-{l}")
+        for line in ctx:
+            b.append(f" {line}")
+        for line in added:
+            b.append(f"+{line}")
+        for line in removed:
+            b.append(f"-{line}")
         blocks.append("\n".join(b))
     return "\n".join(blocks)
 
@@ -98,7 +98,8 @@ CASE_RETURN_CHANGE = {
     "pr": {"project": "order-service", "title": "订单返回增加字段", "description": ""},
     "diff": _mk([
         ("src/order/OrderVO.java", "modified",
-         ["  private String refundStatus;", "  public String getRefundStatus(){return refundStatus;}"],
+         ["  private String refundStatus;",
+          "  public String getRefundStatus(){return refundStatus;}"],
          ["  private String note;", "  public String getNote(){return note;}"],
          ["public class OrderVO {"]),
     ]),
@@ -145,7 +146,9 @@ CASE_LOGGING = {
     "diff": _mk([
         ("src/refund/RefundService.java", "modified",
          ["    logger.info(\"refund start {}\", id);"],
-         [], ["public class RefundService {", "  private static final Logger logger = LoggerFactory.getLogger(RefundService.class);"]),
+         [], ["public class RefundService {",
+          "  private static final Logger logger = "
+          "LoggerFactory.getLogger(RefundService.class);"]),
     ]),
     "should_find": ["LOGGING_CHANGE"],
     "should_not_claim": ["API_CHANGE"],
@@ -180,6 +183,15 @@ CASE_DEBT_HIT = {
     "should_not_claim": [],
     "expected_sources": ["kb-refund-cache"],
     "must_be_unknown": [],
+    # expected_sources 只声明「应命中什么」，这里补「往知识库里放什么」，
+    # 让检索指标能真正驱动一次检索，而不是断言一个空集合。
+    "source_specs": [{
+        "id": "kb-refund-cache", "title": "退款模块缓存一致性问题",
+        "doc_type": "technical_debt", "module": "refund",
+        "project": "order-service", "snippet": "退款缓存需失效策略",
+        "score": 0.9,
+    }],
+    "must_not_retrieve": [],
 }
 
 # ===== 11. 历史债务相似但无关 =====
@@ -188,12 +200,24 @@ CASE_DEBT_SIMILAR = {
     "pr": {"project": "order-service", "title": "修改订单校验", "description": ""},
     "diff": _mk([
         ("src/order/OrderValidator.java", "modified",
-         ["    if (amount <= 0) throw new IllegalArgumentException();"], [], ["public class OrderValidator {"]),
+         ["    if (amount <= 0) throw new IllegalArgumentException();"], [],
+         ["public class OrderValidator {"]),
     ]),
     "should_find": [],
     "should_not_claim": [],
     "expected_sources": [],  # 不应命中 refund 缓存债务
     "must_be_unknown": ["tech_debt"],
+    # 负向用例同样需要知识库非空才判别得了：放入同一 project 的技术债文档，
+    # 若检索链路无视 focus 过滤就会命中它，retrieval_precision 随即 FAIL。
+    # 该用例的变更不含任何业务变更类型，focus 仅 {development_rule, api_document}，
+    # technical_debt 不在其中——因此「不命中」由类型级过滤真实保证。
+    "source_specs": [{
+        "id": "kb-refund-cache", "title": "退款模块缓存一致性问题",
+        "doc_type": "technical_debt", "module": "refund",
+        "project": "order-service", "snippet": "退款缓存需失效策略",
+        "score": 0.9,
+    }],
+    "must_not_retrieve": ["kb-refund-cache"],
 }
 
 # ===== 12. 知识库无相关信息 =====
@@ -202,7 +226,8 @@ CASE_NO_KB_INFO = {
     "pr": {"project": "order-service", "title": "新增导出功能", "description": ""},
     "diff": _mk([
         ("src/export/ExportService.java", "added",
-         ["public class ExportService {", "  public void export(){}", "}"], [], ["package com.export;"]),
+         ["public class ExportService {", "  public void export(){}", "}"], [],
+         ["package com.export;"]),
     ]),
     "should_find": [],
     "should_not_claim": ["tech_debt", "project_rules"],
@@ -215,7 +240,8 @@ CASE_NO_PROJECT_KB = {
     "name": "无知识库项目",
     "pr": {"project": "unknown-service", "title": "随便改点东西", "description": ""},
     "diff": _mk([
-        ("src/Main.java", "modified", ["    int x = 1;"], ["    int x = 2;"], ["public class Main {"]),
+        ("src/Main.java", "modified", ["    int x = 1;"], ["    int x = 2;"],
+         ["public class Main {"]),
     ]),
     "should_find": [],
     "should_not_claim": ["tech_debt", "project_rules"],
@@ -229,7 +255,7 @@ def _large_diff():
     for i in range(100):
         files.append((f"src/mod{i}/Service{i}.java", "modified",
                      [f"  public void m{i}(){{}}"], [f"  public void old{i}(){{}}"],
-                     ["public class Service%s {" % i]))
+                     [f"public class Service{i} {{"]))
     return _mk(files)
 
 CASE_LARGE = {

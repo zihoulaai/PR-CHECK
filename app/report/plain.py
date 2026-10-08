@@ -205,6 +205,10 @@ def _section_sources(report: CheckReport) -> list[str]:
         out += ["", *_wrap("注意：知识库检索暂时不可用，本次已降级为基础自检。")]
     elif report.meta.kb_status == KbStatus.NOT_CONFIGURED:
         out += ["", *_wrap("注意：知识库未配置，本次为基础自检。")]
+    elif report.meta.kb_status == KbStatus.NO_DATASET:
+        out += ["", *_wrap(
+            "注意：本项目未绑定知识库（KB_DATASET_MAP 未命中），本次为基础自检；"
+            "闸门依赖 A/B 级证据，在此状态下不会触发。")]
     return out
 
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from app.parser.base import LineChange, _MODEL_PATTERNS
+from app.parser.base import LineChange, is_data_model_path
 from app.parser.java import JavaParser
 
 # 类 / 接口 / 对象声明：修饰符可叠加（data class / sealed class / companion object ...）
@@ -42,7 +42,7 @@ class KotlinParser(JavaParser):
     ]
 
     def is_data_model_file(self, path: str, lines: list[LineChange]) -> bool:
-        if any(p in path.lower() for p in _MODEL_PATTERNS):
+        if is_data_model_path(path):
             return True
         for lc in lines:
             if "@Entity" in lc.text or "@Table" in lc.text or "data class" in lc.text:

@@ -95,7 +95,7 @@ class OpenAIStyleKBAdapter:
             raise KbError(f"知识库返回了非 JSON 响应：{exc}") from exc
         return doc_id
 
-    def delete(self, doc_id: str) -> None:
+    def delete(self, doc_id: str, *, project: str = "") -> None:
         try:
             with self._client() as c:
                 resp = c.post(

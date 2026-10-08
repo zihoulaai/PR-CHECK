@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 from sqlmodel import Field, SQLModel
 
@@ -26,7 +26,7 @@ class KbDoc(SQLModel, table=True):
     status: str = "active"
     snippet: str = ""
     created_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
 
@@ -47,7 +47,7 @@ class ReportFeedback(SQLModel, table=True):
     label: str = Field(index=True)  # fp（误报）/ useful（有用）
     note: str = ""
     created_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
 
@@ -66,7 +66,7 @@ class GateEvent(SQLModel, table=True):
     specs: str = ""  # 空格分隔的 --fail-on 规则（如 "risk:high rule:violation"）
     blocked: bool = False
     created_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
 
@@ -86,6 +86,6 @@ class AnalysisCache(SQLModel, table=True):
     project: str = Field(default="", index=True)
     hit_count: int = 0
     created_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
     last_hit_at: str = ""

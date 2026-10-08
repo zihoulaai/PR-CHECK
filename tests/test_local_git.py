@@ -19,7 +19,7 @@ from app.domain.enums import Platform
 from app.domain.schemas import MRRef, ProjectRef
 
 
-def _git(repo: "object", *args: str) -> None:
+def _git(repo: object, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(repo), *args],
         check=True, capture_output=True, text=True,
@@ -27,7 +27,7 @@ def _git(repo: "object", *args: str) -> None:
 
 
 @pytest.fixture
-def local_repo(tmp_path) -> "object":
+def local_repo(tmp_path) -> object:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")

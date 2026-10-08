@@ -14,8 +14,8 @@ from app.config import get_settings
 
 
 def _block(path: str, body: str) -> str:
-    return ("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n"
-            "@@ -1,2 +1,3 @@\n x=1\n%s" % (path, path, path, path, body))
+    return (f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+            f"@@ -1,2 +1,3 @@\n x=1\n{body}")
 
 
 # ===== 路径前缀剥离：不得吃掉路径中间的 a/ 与 b/ =====
@@ -180,7 +180,7 @@ def test_empty_diff_profile():
 def _medium_diff(high_impact_body: str, high_impact_path: str) -> str:
     parts = [_block(high_impact_path, high_impact_body)]
     for i in range(23):
-        parts.append(_block("src/plain/P%d.java" % i, "+int v%d = %d;\n" % (i, i)))
+        parts.append(_block(f"src/plain/P{i}.java", f"+int v{i} = {i};\n"))
     return "".join(parts)
 
 
@@ -215,7 +215,7 @@ def test_focus_features_cover_every_high_impact_feature():
 
 def test_no_high_impact_keeps_all():
     """无任何高影响特征时保留全部是有意设计（避免空 context），不是缺陷。"""
-    parts = [_block("src/plain/P%d.java" % i, "+int v%d = %d;\n" % (i, i))
+    parts = [_block(f"src/plain/P{i}.java", f"+int v{i} = {i};\n")
              for i in range(23)]
     d = "".join(parts)
     parsed = parse_diff(d)

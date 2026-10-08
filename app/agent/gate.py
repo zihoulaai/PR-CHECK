@@ -36,7 +36,7 @@ _SECTION_VALUES = {
 }
 
 
-def parse_gate_rules(rules: "list[str] | None") -> "list[tuple[str, str]]":
+def parse_gate_rules(rules: list[str] | None) -> list[tuple[str, str]]:
     """把 --fail-on 字符串列表解析为 (section, value)；非法格式抛 ValueError。"""
     parsed: list[tuple[str, str]] = []
     for raw in rules or []:
@@ -53,12 +53,13 @@ def parse_gate_rules(rules: "list[str] | None") -> "list[tuple[str, str]]":
                 f"非法的 --fail-on 段：{section!r}（可选：{', '.join(_SECTION_VALUES)}）")
         if value not in allowed:
             raise ValueError(
-                f"非法的 --fail-on 值：{value!r}（段 {section} 可选：{', '.join(sorted(allowed))}）")
+                f"非法的 --fail-on 值：{value!r}"
+                f"（段 {section} 可选：{', '.join(sorted(allowed))}）")
         parsed.append((section, value))
     return parsed
 
 
-def evaluate_gate(report: CheckReport, specs: "list[tuple[str, str]]") -> list[str]:
+def evaluate_gate(report: CheckReport, specs: list[tuple[str, str]]) -> list[str]:
     """返回命中的拦截原因列表（空 = 放行）。specs 为 parse_gate_rules 的输出。"""
     if not specs:
         return []

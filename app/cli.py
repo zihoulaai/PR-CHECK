@@ -30,7 +30,8 @@ import sys
 from pathlib import Path
 
 # 布局常量：装机形态下 __file__ 位于 <site-packages>/app/cli.py，上一级即包容器目录；
-# 源码形态下上一级才是仓库根（能找到 bin/pr_check_cli.py）。据此区分调用形态（见 is_source_layout）。
+# 源码形态下上一级才是仓库根（能找到 bin/pr_check_cli.py）。
+# 据此区分调用形态（见 is_source_layout）。
 _PKG_ROOT = Path(__file__).resolve().parent          # .../app
 _LAYOUT_ROOT = _PKG_ROOT.parent                      # 源码时是仓库根，装机时是 site-packages
 if str(_LAYOUT_ROOT) not in sys.path:
@@ -39,14 +40,16 @@ if str(_LAYOUT_ROOT) not in sys.path:
 # 装机形态（-m app.cli）下钩子用它唤起本 CLI，避免依赖 PATH 上是否存在 pr-check
 CLI_MODULE = "app.cli"
 
-from app.adapters.base import GitCredential, KbDocInput
-from app.agent.workflow import run_check, run_check_from_diff
-from app.container import get_container
-from app.domain.enums import DocType, Platform
-from app.domain.schemas import MRRef, ProjectRef
-from app.errors import AppError, NotConfiguredError, ValidationError
-from app.report.markdown import render_markdown
-from app.report.plain import render_plain
+# 以下 import 必须晚于上方的 sys.path 调整：源码形态（未安装、直接 python app/cli.py）
+# 下 app 不在 path 上，先 import 会 ImportError。逐行豁免 E402 以显式记录该约束。
+from app.adapters.base import GitCredential, KbDocInput  # noqa: E402
+from app.agent.workflow import run_check, run_check_from_diff  # noqa: E402
+from app.container import get_container  # noqa: E402
+from app.domain.enums import DocType, Platform  # noqa: E402
+from app.domain.schemas import MRRef, ProjectRef  # noqa: E402
+from app.errors import AppError, KbError, NotConfiguredError, ValidationError  # noqa: E402
+from app.report.markdown import render_markdown  # noqa: E402
+from app.report.plain import render_plain  # noqa: E402
 
 VERSION = "1.0.0"
 
@@ -82,7 +85,7 @@ def _read_stdin() -> str:
     try:
         if hasattr(sys.stdin, "reconfigure"):
             sys.stdin.reconfigure(encoding="utf-8")
-    except Exception:
+    except Exception:  # noqa: BLE001 - 非 TTY / 不支持 reconfigure 时按原编码读
         pass
     return sys.stdin.read()
 
@@ -93,7 +96,7 @@ def _read_diff(args: argparse.Namespace) -> str:
     if source == "-":
         return _read_stdin()
     if source:
-        with open(source, "r", encoding="utf-8") as fh:
+        with open(source, encoding="utf-8") as fh:
             return fh.read()
     raise ValidationError("需要提供 diff 来源：--diff <file> 或 --diff -（管道）。")
 
@@ -155,7 +158,8 @@ def _emit_ci_payload(args: argparse.Namespace, report, violations: list, fail_on
         "pr_id": report.meta.pr_id,
         "analysis_mode": report.meta.analysis_mode,
         "kb_status": report.meta.kb_status,
-        "gate": {"fail_on": list(fail_on), "blocked": bool(violations), "violations": list(violations)},
+        "gate": {"fail_on": list(fail_on), "blocked": bool(violations),
+                 "violations": list(violations)},
         "exit_code": rc,
         "report": {"markdown": str(out), "json": str(json_path)},
         "note_body": md_text,
@@ -244,7 +248,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         try:
             specs = parse_gate_rules(args.fail_on)
         except ValueError as exc:
-            raise ValidationError(str(exc))
+            raise ValidationError(str(exc)) from exc
         violations = evaluate_gate(report, specs)
         # R2：记录闸门事件供 metrics 统计（默认开启，失败不影响自检）
         _record_gate_event(report, args.fail_on, violations)
@@ -295,6 +299,7 @@ def cmd_config(args: argparse.Namespace) -> int:
         USER_ENV_FILE,
         active_config_files,
         database_path,
+        dataset_mapping,
         get_settings,
         is_kb_configured,
         is_llm_configured,
@@ -313,6 +318,7 @@ def cmd_config(args: argparse.Namespace) -> int:
 
     s = get_settings()
     files = active_config_files()
+    datasets = dataset_mapping(s)
     payload = {
         "config_files": files,                     # 按优先级升序，最后一个优先级最高
         "user_env_file": str(USER_ENV_FILE),
@@ -320,9 +326,16 @@ def cmd_config(args: argparse.Namespace) -> int:
         "app_env": s.app_env,
         "llm_configured": is_llm_configured(s),
         "kb_configured": is_kb_configured(s),
+        # 单库（KB_INDEX）或按项目分库（KB_DATASET_MAP）。两者都不配即无库。
+        "kb_routing": "per_project" if datasets else ("single" if s.kb_index else "none"),
+        "kb_datasets": datasets,
+        # 分库模式下默认 dataset 不参与路由：未命中映射的项目一律「无库」，
+        # 不会静默回落到 KB_INDEX——否则漏配项目会落进共享库，隔离形同虚设。
+        "kb_index_used": (not datasets) and bool(s.kb_index),
     }
     # 旧版默认把库建在 cwd：换了默认路径后老数据不会自动跟过来，这里提示一下。
-    if LEGACY_CWD_DB.is_file() and Path(LEGACY_CWD_DB).resolve() != Path(database_path(s)).resolve():
+    if (LEGACY_CWD_DB.is_file()
+            and Path(LEGACY_CWD_DB).resolve() != Path(database_path(s)).resolve()):
         payload["legacy_db_hint"] = (
             f"检测到当前目录遗留 {LEGACY_CWD_DB}：默认数据已迁到用户状态目录，"
             f"如需沿用旧数据请执行 move/copy 后设置 DATABASE_URL。"
@@ -460,20 +473,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_check.add_argument("--target-branch", help="目标分支（diff 模式）。")
     p_check.add_argument("--author", help="作者（diff 模式）。")
     p_check.add_argument("--repo", help="本地仓库路径（platform=local 直连 .git）；"
-                                        "platform=github/gitlab 时为项目路径（owner/repo 或 group/project）。")
+                                        "platform=github/gitlab 时为项目路径"
+                                        "（owner/repo 或 group/project）。")
     p_check.add_argument("--base", help="本地模式目标分支（默认 main），用于计算 diff。")
     p_check.add_argument("--source", help="本地模式源引用（默认 HEAD，即当前分支提交）。")
     p_check.add_argument("--platform", choices=[p.value for p in Platform], default=None,
-                         help="Git 数据源：local（默认，直连 .git）/ github / gitlab（只读 API，需 GIT_TOKEN）。")
+                         help="Git 数据源：local（默认，直连 .git）/ github / gitlab"
+                              "（只读 API，需 GIT_TOKEN）。")
     p_check.add_argument("--mr", type=int, metavar="NUMBER",
                          help="远端平台 MR/PR 编号（platform=github/gitlab 时必填）。")
     p_check.add_argument("--git-base-url", dest="git_base_url", metavar="URL",
-                         help="远端平台 API 基址（默认官方；企业版/自建填 https://<host>/api/v3 等）。")
+                         help="远端平台 API 基址（默认官方；企业版/自建填"
+                              " https://<host>/api/v3 等）。")
     p_check.add_argument("--git-token", dest="git_token",
                          help="远端平台访问 Token（覆盖 GIT_TOKEN 配置）。")
     p_check.add_argument("--fake", action="store_true", help="使用离线 Fake 适配器。")
     p_check.add_argument("--format", choices=["json", "md", "text"], default="json",
-                         help="输出格式：json（默认，结构化）/ md（Markdown）/ text（纯文本，终端直读无需渲染器）。")
+                         help="输出格式：json（默认，结构化）/ md（Markdown）"
+                              "/ text（纯文本，终端直读无需渲染器）。")
     p_check.add_argument("--pretty", action="store_true", help="JSON 缩进美化。")
     p_check.add_argument(
         "--fail-on", action="append", metavar="SPEC",
@@ -501,14 +518,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_completions.add_argument("shell", choices=["bash", "zsh", "fish"], help="目标 shell")
 
     # config（init 生成 .env / show 排查配置来源与数据落点）
-    p_config = sub.add_parser("config", help="init：从内嵌模板生成 .env；show：显示生效配置文件、SQLite 路径与 LLM/KB 配置状态。")
+    p_config = sub.add_parser(
+        "config",
+        help="init：从内嵌模板生成 .env；show：显示生效配置文件、SQLite 路径与 LLM/KB 配置状态。")
     p_config.add_argument(
         "action", nargs="?", choices=["show", "init"], default="show",
         help="动作（默认 show；写成 pr-check config 亦可）。init 从内嵌模板生成 .env。",
     )
     p_config.add_argument(
         "--path", metavar="FILE",
-        help="init 的目标路径（默认用户级 .env：~/.config/pr-check/.env 或 %%APPDATA%%\\pr-check\\.env）。",
+        help="init 的目标路径（默认用户级 .env：~/.config/pr-check/.env"
+             " 或 %%APPDATA%%\\pr-check\\.env）。",
     )
     p_config.add_argument(
         "--force", action="store_true",
@@ -552,6 +572,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_kb_list.add_argument("--project")
     p_kb_list.add_argument("--module")
     p_kb_list.add_argument("--doc-type")
+    p_kb_list.add_argument(
+        "--remote", action="store_true",
+        help="列出向量库侧实际存在的文档，并与本地注册表比对标记 managed。"
+             "默认只列本地注册表，因此他人上传 / 元数据丢失的文档不可见——"
+             "它们会被检索命中却无法清理。")
     p_kb_list.add_argument("--status", choices=["active", "stale"],
                            help="按状态过滤（默认不过滤；stale=被 --prune 标记的过期来源）。")
     p_kb_import = kb_sub.add_parser("import", help="批量导入目录下的文档（单篇失败不拖垮整批）。")
@@ -561,9 +586,19 @@ def build_parser() -> argparse.ArgumentParser:
                              help="本批统一的文档类型")
     p_kb_import.add_argument("--module", default="", help="模块名（可选）")
     p_kb_import.add_argument("--prune", action="store_true",
-                             help="把本批未覆盖的既有 active 文档标记为 stale（过期），不再参与检索")
+                             help="把本批未覆盖的既有 active 文档标记为 stale"
+                                  "（过期），不再参与检索")
     p_kb_del = kb_sub.add_parser("delete", help="删除知识文档（向量库与本地元数据一并删除）。")
-    p_kb_del.add_argument("--id", required=True, dest="doc_id", help="文档 id（kb list 输出）")
+    p_kb_del.add_argument("--id", required=True, dest="doc_id",
+                          help="文档 id（kb list 输出）")
+    p_kb_del.add_argument(
+        "--project",
+        help="按项目分库（KB_DATASET_MAP）时删除必须指明所属项目。受管文档会自动"
+             "从本地元数据反查，仅在反查不到时才需显式指定。")
+    p_kb_del.add_argument(
+        "--force", action="store_true",
+        help="允许删除本地注册表中不存在的文档。默认只删本工具 kb upload 记录过的 id，"
+             "以防误删线上文档；清理他人上传 / 元数据丢失 / 迁移遗留的文档时才需要。")
     p_kb_suggest = kb_sub.add_parser(
         "suggest", help="按当前变更画像建议需关注/需补录的知识文档（只读，不写入）。")
     p_kb_suggest.add_argument("--repo", default=".", help="本地仓库路径（默认当前目录）。")
@@ -590,6 +625,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook_un.add_argument("--hook-name", default="pre-push", help="钩子名（默认 pre-push）。")
 
     return parser
+
+
+def _kb_is_per_project(kb) -> bool:
+    """当前 KB 是否按项目分库（决定删除/列举是否必须指定 --project）。"""
+    return bool(getattr(kb, "strict", False)) and bool(getattr(kb, "projects", []))
 
 
 def _kb_upload_one(kb, project: str, module: str, doc_type: str, title: str,
@@ -624,8 +664,8 @@ def cmd_kb(args: argparse.Namespace) -> int:
     if action == "upload":
         try:
             DocType(args.doc_type)
-        except ValueError:
-            raise ValidationError(f"不支持的 doc_type：{args.doc_type}")
+        except ValueError as exc:
+            raise ValidationError(f"不支持的 doc_type：{args.doc_type}") from exc
         path = Path(args.file)
         if not path.exists():
             raise FileNotFoundError(args.file)
@@ -637,7 +677,7 @@ def cmd_kb(args: argparse.Namespace) -> int:
             raise ValidationError(
                 f"文件不是 UTF-8 文本，无法上传：{args.file}（{exc}）。"
                 "请先转换为 UTF-8 文本（如 txt / md）后再上传。"
-            )
+            ) from exc
         doc_id = _kb_upload_one(
             kb, args.project, args.module, args.doc_type,
             args.title or path.name, content,
@@ -653,24 +693,83 @@ def cmd_kb(args: argparse.Namespace) -> int:
         # 供应商删除失败抛 KbError → KB_UNAVAILABLE rc 6，本地元数据保留以便重试。
         from app.storage.repo import delete_kb_doc, list_kb_docs
 
-        known = {d.id for d in list_kb_docs()}
-        if args.doc_id not in known:
+        docs = list_kb_docs()
+        known = {d.id for d in docs}
+        forced = bool(getattr(args, "force", False))
+        if args.doc_id not in known and not forced:
             raise ValidationError(
                 f"本地不存在 id={args.doc_id} 的文档；请先 kb list 确认"
-                f"（删除只接受本工具上传时记录的 id，防误删线上文档）。")
-        kb.delete(args.doc_id)
-        removed = delete_kb_doc(args.doc_id)
-        _emit({"id": args.doc_id, "deleted": True,
-               "local_meta_removed": removed}, args)
+                f"（删除默认只接受本工具上传时记录的 id，防误删线上文档）。"
+                f"若确认要清理非本工具管理的文档，加 --force 强制删除。")
+        # 按项目分库时，删除必须知道去哪个库删。受管文档从本地 KbDoc 反查 project
+        # （上传时已记录）；无主文档（--force）没有记录可查，必须显式 --project——
+        # 不猜，因为猜错就是删掉别的项目的数据且不可逆。
+        project = getattr(args, "project", "") or ""
+        if not project:
+            match = next((d for d in docs if d.id == args.doc_id), None)
+            project = match.project if match is not None else ""
+        if not project and _kb_is_per_project(kb):
+            raise ValidationError(
+                f"按项目分库时删除必须指明项目：本地元数据里没有 id={args.doc_id} 的"
+                f"归属记录，请显式加 --project <PROJECT>。")
+        # 供应商删除失败抛 KbError → KB_UNAVAILABLE rc 6，本地元数据保留以便重试。
+        # 删除顺序不可颠倒：向量库先成功，才敢清本地记录（避免「本地已删、线上还在」
+        # 这种无从重试的中间态）。
+        kb.delete(args.doc_id, project=project)
+        removed = delete_kb_doc(args.doc_id) if args.doc_id in known else False
+        # forced 只在真的强制删除时出现：默认路径的输出结构保持不变，
+        # 免得为了一个恒为 false 的字段改动所有消费方的解析。
+        payload = {"id": args.doc_id, "deleted": True,
+                   "local_meta_removed": removed}
+        if forced:
+            payload["forced"] = True
+        _emit(payload, args)
         return EXIT_OK
     # list
     from app.storage.repo import list_kb_docs
     docs = list_kb_docs(project=args.project, module=args.module,
                         doc_type=args.doc_type, status=getattr(args, "status", None))
+    if getattr(args, "remote", False):
+        _emit(_kb_list_remote(kb, docs, args.project), args)
+        return EXIT_OK
     _emit([{"id": d.id, "project": d.project, "module": d.module,
             "doc_type": d.doc_type, "title": d.title, "status": d.status}
            for d in docs], args)
     return EXIT_OK
+
+
+def _kb_list_remote(kb, local_docs, project: str = "") -> list[dict]:
+    """列出向量库侧文档，并标注哪些不在本地注册表（managed=false）。
+
+    这是发现「无主文档」的唯一途径：它们会被检索命中、以 A/B 级证据进入报告，
+    却既不在 `kb list` 默认输出里，也删不掉（delete 默认只接受注册表 id）。
+    供应商不支持列举时抛 KbError → KB_UNAVAILABLE rc 6，如实告知而非静默返回空表。
+    """
+    if _kb_is_per_project(kb) and not project:
+        raise ValidationError(
+            "按项目分库时列举文档必须指明项目：加 --project <PROJECT>。")
+    lister = getattr(kb, "list_documents", None)
+    if not callable(lister):
+        raise KbError(
+            f"{type(kb).__name__} 不支持列举向量库文档（list_documents 未实现）；"
+            f"改用 `kb list` 查看本地注册表。")
+
+    known = {d.id: d for d in local_docs}
+    out: list[dict] = []
+    for raw in lister():
+        doc_id = raw.get("id", "")
+        local = known.get(doc_id)
+        out.append({
+            "id": doc_id,
+            "name": raw.get("name", ""),
+            "managed": local is not None,
+            "word_count": raw.get("word_count"),
+            "indexing_status": raw.get("indexing_status"),
+            "project": local.project if local else "",
+            "doc_type": local.doc_type if local else "",
+            "module": local.module if local else "",
+        })
+    return out
 
 
 def _kb_import(kb, args: argparse.Namespace) -> int:
@@ -875,7 +974,8 @@ def _git_toplevel() -> str:
             capture_output=True, text=True, check=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        raise ValidationError(f"当前目录不是 git 仓库，无法安装钩子：{exc}")
+        raise ValidationError(
+            f"当前目录不是 git 仓库，无法安装钩子：{exc}") from exc
     return out.stdout.strip()
 
 
@@ -967,7 +1067,8 @@ def _hook_install(args: argparse.Namespace) -> int:
     from app.config import get_settings, is_kb_configured
     if not is_kb_configured(get_settings()):
         print("提示：未检测到知识库配置（KB_BASE_URL / KB_API_KEY）。")
-        print("      未配置知识库时，--fail-on risk:* 与 rule:violation 依赖的 A/B 级证据不可得，闸门不会触发；")
+        print("      未配置知识库时，--fail-on risk:* 与 rule:violation 依赖的"
+              " A/B 级证据不可得，闸门不会触发；")
         print("      配置并 kb upload 规范后请重跑 pr-check hook install。")
     return EXIT_OK
 
@@ -1030,8 +1131,9 @@ def _parse_item_ref(ref: str) -> tuple[str, int]:
             f"section 可选：{', '.join(sorted(_FEEDBACK_SECTIONS))}）。")
     try:
         index = int(idx)
-    except ValueError:
-        raise ValidationError(f"非法的条目序号：{idx!r}（应为非负整数）。")
+    except ValueError as exc:
+        raise ValidationError(
+            f"非法的条目序号：{idx!r}（应为非负整数）。") from exc
     if index < 0:
         raise ValidationError(f"非法的条目序号：{index}（应为非负整数）。")
     return section, index
@@ -1206,7 +1308,8 @@ def main(argv: list[str] | None = None) -> int:
         return _emit_error(exc.code, str(exc.args[0] if exc.args else exc.friendly_message),
                            args.error_stream)
     except ValidationError as exc:
-        return _emit_error("INVALID_REQUEST", str(exc.args[0] if exc.args else "请求参数校验失败。"),
+        return _emit_error("INVALID_REQUEST",
+                           str(exc.args[0] if exc.args else "请求参数校验失败。"),
                            args.error_stream)
     except FileNotFoundError as exc:
         return _emit_error("INVALID_REQUEST", f"文件不存在：{exc.filename}", args.error_stream)
@@ -1214,7 +1317,8 @@ def main(argv: list[str] | None = None) -> int:
         import logging
 
         logging.getLogger("pr_check").error("cli_unexpected type=%s", type(exc).__name__)
-        return _emit_error("INTERNAL_ERROR", "命令执行发生内部错误，请稍后重试。", args.error_stream)
+        return _emit_error("INTERNAL_ERROR", "命令执行发生内部错误，请稍后重试。",
+                           args.error_stream)
 
 
 if __name__ == "__main__":  # python -m app.cli / python app/cli.py

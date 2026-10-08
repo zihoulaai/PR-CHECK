@@ -1,0 +1,38 @@
+name: mutation
+
+# 变异检测：注入已知缺陷，验证测试套件是否真的会变红。
+#
+# 为什么单独一个 workflow、且不挂在 PR 上：
+#   - 耗时：18 个变异体，每个跑一遍 pytest + 两档评估，约 7~10 分钟；
+#   - 作用特殊：它捕捉的是「重构悄悄削弱了测试」。这类问题不会让任何测试变红，
+#     只有主动注入缺陷才会暴露，因此不能靠「测试全绿」来证明，只能靠定时体检。
+#
+# 本项目历史上出现过「353 个测试全绿、但 Java 符号抽取实际全错」的状态——
+# 测试覆盖了调用链，却没有一条断言真正校验被调用的逻辑。这个 workflow 就是
+# 为了防止同类退化再次悄悄发生。
+on:
+  schedule:
+    # 每日一次（仓库默认时区为 UTC）。刻意避开整点，错开其它项目的定时任务高峰。
+    - cron: "37 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  mutation:
+    name: 变异检测
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      # 有缺陷逃过所有验证层时以退出码 1 结束。
+      - name: 注入缺陷并检查是否被抓到
+        run: uv run python tests/mutation_check.py
+
+      - name: 变异体清单（供人工复核覆盖范围）
+        run: uv run python tests/mutation_check.py --list

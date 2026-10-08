@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from app.parser.base import LanguageParser, LineChange, _MODEL_PATTERNS
+from app.parser.base import LanguageParser, LineChange, is_data_model_path
 
 _PACKAGE_RE = re.compile(r"^\s*package\s+([A-Za-z_]\w*)")
 _TYPE_RE = re.compile(r"^\s*type\s+([A-Za-z_]\w*)\s+(struct|interface)")
@@ -34,7 +34,7 @@ class GoParser(LanguageParser):
     api_patterns = _API_PATTERNS
 
     def is_data_model_file(self, path: str, lines: list[LineChange]) -> bool:
-        if _MODEL_PATTERNS and any(p in path.lower() for p in _MODEL_PATTERNS):
+        if is_data_model_path(path):
             return True
         for lc in lines:
             if "type" in lc.text and "struct" in lc.text:

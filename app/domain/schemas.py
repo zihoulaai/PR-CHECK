@@ -4,8 +4,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, UTC
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -24,11 +23,11 @@ from app.domain.enums import (
 
 # ===== 引用归一（C12 / D12） =====
 class ProjectRef(BaseModel):
-    id: Optional[int] = None
-    path: Optional[str] = None
+    id: int | None = None
+    path: str | None = None
 
     @model_validator(mode="after")
-    def _need_one(self) -> "ProjectRef":
+    def _need_one(self) -> ProjectRef:
         if self.id is None and not self.path:
             raise ValueError("ProjectRef 至少需要 id 或 path 之一")
         return self
@@ -120,7 +119,7 @@ class KBQuery(BaseModel):
 
     # 字段上限（M2）：避免 Context 膨胀
     @model_validator(mode="after")
-    def _clip(self) -> "KBQuery":
+    def _clip(self) -> KBQuery:
         self.modules = self.modules[:10]
         self.key_files = self.key_files[:20]
         self.key_symbols = self.key_symbols[:30]
@@ -143,6 +142,11 @@ class KBHit(BaseModel):
     project: str = ""
     snippet: str = ""
     score: float = 0.0
+    # 维度是否来自本地 KbDoc 元数据（而非供应商响应）。
+    # Dify 片段不带 project / doc_type / module，adapter 用本地元数据回填后置 True；
+    # 仍为 False 说明该命中没有本地元数据依据（他人上传或元数据库不可用），
+    # 此时 project 只是「按查询回填」，隔离强度不足以支撑跨项目结论。
+    metadata_resolved: bool = False
 
 
 # ===== CheckReport（CheckReport Schema / ADR §3.2） =====
@@ -151,12 +155,18 @@ class ReportMeta(BaseModel):
     project: str = ""
     # 稳定报告标识（R2）：project-branch-diffhash；供 feedback / metrics 引用。
     report_id: str = ""
-    generated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    generated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     model: str = ""
     analysis_mode: AnalysisMode = AnalysisMode.FULL
     kb_status: KbStatus = KbStatus.NOT_CONFIGURED
     # 本次 LLM 综合是否命中缓存（R3）；summary_only / 未启用缓存时恒为 False。
     cache_hit: bool = False
+    # 本次因证据规则而被降级 / 剥离 / 丢弃的条目数（P2）。
+    # 之前这些修正全部静默发生：用户看到的是「干净的 C 级结论」，却不知道自己
+    # 原本给出的 A 级强结论因为引用无效或类型不支撑而被降掉了。
+    degraded_count: int = 0
+    # 逐条说明（人可读）。仅在 PR_CHECK_DEBUG 开启时填充，避免默认输出过长。
+    evidence_issues: list[str] = Field(default_factory=list)
 
 
 class DocCheckItem(BaseModel):

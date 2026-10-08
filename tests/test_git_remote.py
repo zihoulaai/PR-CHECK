@@ -14,7 +14,6 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.adapters import http_git
 from app.adapters.base import GitCredential
 from app.adapters.github import GitHubAdapter
 from app.adapters.gitlab import GitLabAdapter

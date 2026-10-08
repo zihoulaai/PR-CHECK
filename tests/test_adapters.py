@@ -198,7 +198,8 @@ def test_all_schema_rejected_falls_back_to_json_object(monkeypatch):
         monkeypatch, [rejected, rejected, _RespWithBody(200), _RespWithBody(200)],
         schema=_SAMPLE_SCHEMA)
     client.complete("s", "u")
-    assert [c["response_format"]["type"] for c in calls] == ["json_schema", "json_schema", "json_object"]
+    assert [c["response_format"]["type"] for c in calls] == [
+        "json_schema", "json_schema", "json_object"]
     # 降级被实例记住：后续请求直接用 json_object，不再重复试探
     calls.clear()
     client.complete("s", "u")

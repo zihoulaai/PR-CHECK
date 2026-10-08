@@ -150,11 +150,18 @@ def test_fabricated_source_ref_downgraded(container):
 
 
 def test_valid_source_ref_kept_and_listed(container):
+    """真实命中的来源应保留 A 级并进入 kb_sources。
+
+    来源类型必须与所在段落契合（evidence 规则 4）：risk 只接受
+    technical_debt / historical_risk / development_rule，因此这里用
+    historical_risk；早前用 api_document 支撑风险条目属于错配式引用，
+    正是该规则要拦的情况。
+    """
     from app.adapters.fakes import FakeKB
 
     kb = FakeKB()
-    kb.add_doc(id="kb-real-1", title="退款接口规范", doc_type="api_document",
-               module="refund", project="team/order", snippet="退款接口需兼容旧版")
+    kb.add_doc(id="kb-real-1", title="退款缓存历史风险", doc_type="historical_risk",
+               module="refund", project="team/order", snippet="退款缓存需失效策略")
     container.kb = kb
     container.llm = FakeLLM(report_override={
         "summary": "s", "doc_check": [],
@@ -167,6 +174,34 @@ def test_valid_source_ref_kept_and_listed(container):
     assert report.risk[0].evidence_level.value == "A"
     assert report.risk[0].source_refs == ["kb-real-1"]
     assert [s.id for s in report.kb_sources] == ["kb-real-1"]
+
+
+def test_wrong_doc_type_source_is_downgraded(container):
+    """真实命中但类型不支撑该段落的来源必须降级（evidence 规则 4）。
+
+    真实运行暴露的场景：tech_debt 的 direct_match 引用《代码风格与结构规范》
+    （development_rule）——来源真实存在，但与结论无关。伪造 id 挡得住，
+    这种「真实 id + 无关内容」的凑数引用挡不住。
+    """
+    from app.adapters.fakes import FakeKB
+
+    kb = FakeKB()
+    kb.add_doc(id="kb-style", title="代码风格与结构规范", doc_type="development_rule",
+               module="core", project="team/order", snippet="命名与目录约定")
+    container.kb = kb
+    container.llm = FakeLLM(report_override={
+        "summary": "s", "doc_check": [],
+        "risk": [],
+        "project_rules": [],
+        "tech_debt": [{"item": "Java 正则捕获组错误", "verdict": "direct_match",
+                       "evidence_level": "B", "source_refs": ["kb-style"]}],
+        "manual_checklist": [],
+    })
+
+    report = run_check_from_diff(SMALL_DIFF, project="team/order")
+    debt = report.tech_debt[0]
+    assert debt.evidence_level.value == "C"
+    assert debt.verdict.value == "possible"
 
 
 def test_n_level_forced_to_unknown_in_report(container):

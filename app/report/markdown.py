@@ -98,7 +98,9 @@ def _section_risk(report: CheckReport) -> str:
             # location 为「文件:行号」定位指针：有则以行内代码展示，无则省略；
             # 反引号消毒避免破坏 Markdown 行内代码
             loc = f" `{r.location.replace('`', chr(39))}`" if r.location else ""
-            out.append(f"-{loc} {r.text}  {_EVIDENCE_BADGE.get(r.evidence_level, '')}  {_refs(r.source_refs)}")
+            out.append(f"-{loc} {r.text}  "
+                       f"{_EVIDENCE_BADGE.get(r.evidence_level, '')}  "
+                       f"{_refs(r.source_refs)}")
     return "\n".join(out)
 
 
@@ -137,6 +139,10 @@ def _section_sources(report: CheckReport) -> str:
         note = "\n\n> 知识库检索暂时不可用，本次已降级为基础自检。"
     elif report.meta.kb_status == KbStatus.NOT_CONFIGURED:
         note = "\n\n> 知识库未配置，本次为基础自检。"
+    elif report.meta.kb_status == KbStatus.NO_DATASET:
+        # 措辞必须点明「配了多库但这个项目没建」，否则与「知识库未配置」无法区分
+        note = "\n\n> 本项目未绑定知识库（KB_DATASET_MAP 未命中），本次为基础自检。"
+        note += "闸门依赖 A/B 级证据，在此状态下不会触发。"
     else:
         note = ""
     if not report.kb_sources:

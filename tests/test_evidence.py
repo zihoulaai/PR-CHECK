@@ -5,6 +5,8 @@ doc_check 证据、violation / direct_match 降级。
 """
 from __future__ import annotations
 
+import pytest
+
 from app.domain.enums import DocCheckVerdict, EvidenceLevel, RiskLevel, RuleVerdict, TechDebtVerdict
 from app.domain.schemas import (
     CheckReport, DocCheckItem, ReportMeta, RiskItem, RuleItem, TechDebtItem,
@@ -13,6 +15,15 @@ from app.agent.evidence import sanitize_report, validate_report
 
 # 本次检索真实命中的知识库来源
 VALID = {"kb-real-1"}
+# 来源类型（规则 4）。real-world 场景：Dify 上同时存在四类文档，
+# LLM 可能拿《代码风格》去支撑技术债务判定——来源真实命中但内容无关。
+TYPES = {
+    "kb-real-1": "api_document",
+    "kb-rule": "development_rule",
+    "kb-debt": "technical_debt",
+    "kb-risk": "historical_risk",
+    "kb-unknown": "",
+}
 
 
 def _meta():
@@ -52,7 +63,8 @@ def test_rule_violation_without_evidence_downgraded():
 
 def test_tech_debt_strong_without_refs_downgraded():
     r = CheckReport(meta=_meta(), tech_debt=[
-        TechDebtItem(item="缓存", verdict=TechDebtVerdict.DIRECT_MATCH, evidence_level=EvidenceLevel.B,
+        TechDebtItem(item="缓存", verdict=TechDebtVerdict.DIRECT_MATCH,
+                     evidence_level=EvidenceLevel.B,
                      source_refs=[]),
     ])
     cleaned = sanitize_report(r, valid_refs=VALID)
@@ -158,3 +170,114 @@ def test_n_level_keeps_existing_unknown_marker():
     assert validate_report(r, valid_refs=VALID) == []
     cleaned = sanitize_report(r, valid_refs=VALID)
     assert cleaned.doc_check[0].basis == "无法判断，知识库未检索到相关信息"
+
+
+# ===== 规则 4：来源类型必须能支撑所在段落 =====
+#
+# 真实运行暴露的场景：tech_debt 的 direct_match 引用了《代码风格与结构规范》
+# （development_rule）。来源真实命中，因此规则 1-3 全部放行——但一份讲命名与目录
+# 的文档不可能支撑「Java 正则捕获组写错」这种技术债务判定。伪造 id 拦得住，
+# 这种「真实 id + 无关内容」的凑数引用拦不住。
+_ALL = set(TYPES)
+
+
+@pytest.mark.parametrize("section,builder,bad_ref,good_ref", [
+    ("doc_check", lambda ref, lv: DocCheckItem(
+        item="API 文档", verdict=DocCheckVerdict.CONFIRM, basis="接口签名不一致",
+        advice="", evidence_level=lv, source_refs=[ref]),
+     "kb-rule", "kb-real-1"),
+    ("project_rules", lambda ref, lv: RuleItem(
+        item="命名约定", verdict=RuleVerdict.OK, evidence_level=lv,
+        source_refs=[ref]),
+     "kb-debt", "kb-rule"),
+    ("tech_debt", lambda ref, lv: TechDebtItem(
+        item="Java 正则捕获组错误", verdict=TechDebtVerdict.RELATED,
+        evidence_level=lv, source_refs=[ref]),
+     "kb-rule", "kb-debt"),
+    ("risk", lambda ref, lv: RiskItem(
+        level=RiskLevel.HIGH, text="注意事务边界", evidence_level=lv,
+        source_refs=[ref]),
+     "kb-real-1", "kb-debt"),
+])
+def test_wrong_doc_type_downgrades_strong_level(section, builder, bad_ref, good_ref):
+    """真实命中但类型与段落无关时，A/B 必须降为 C。"""
+    r = CheckReport(meta=_meta(), **{section: [builder(bad_ref, EvidenceLevel.B)]})
+    cleaned = sanitize_report(r, valid_refs=_ALL, ref_doc_types=TYPES)
+    item = getattr(cleaned, section)[0]
+    assert item.evidence_level == EvidenceLevel.C, section
+
+
+@pytest.mark.parametrize("section,builder,good_ref", [
+    ("doc_check", lambda ref, lv: DocCheckItem(
+        item="API 文档", verdict=DocCheckVerdict.CONFIRM, basis="接口签名不一致",
+        advice="", evidence_level=lv, source_refs=[ref]), "kb-real-1"),
+    ("project_rules", lambda ref, lv: RuleItem(
+        item="命名约定", verdict=RuleVerdict.OK, evidence_level=lv,
+        source_refs=[ref]), "kb-rule"),
+    ("tech_debt", lambda ref, lv: TechDebtItem(
+        item="缓存未失效", verdict=TechDebtVerdict.DIRECT_MATCH,
+        evidence_level=lv, source_refs=[ref]), "kb-debt"),
+    ("risk", lambda ref, lv: RiskItem(
+        level=RiskLevel.HIGH, text="事务边界缺失", evidence_level=lv,
+        source_refs=[ref]), "kb-risk"),
+])
+def test_matching_doc_type_keeps_strong_level(section, builder, good_ref):
+    """类型契合时 A/B 不受影响——规则 4 不能误伤合规引用。"""
+    r = CheckReport(meta=_meta(), **{section: [builder(good_ref, EvidenceLevel.B)]})
+    cleaned = sanitize_report(r, valid_refs=_ALL, ref_doc_types=TYPES)
+    assert getattr(cleaned, section)[0].evidence_level == EvidenceLevel.B, section
+
+
+def test_unknown_doc_type_cannot_support_strong_level():
+    """来源 doc_type 未知（如非本工具上传、无法解析归属）不得支撑 A/B。
+
+    严格处理：无法证明来源类型，就不能让它支撑强结论。
+    """
+    r = CheckReport(meta=_meta(), tech_debt=[TechDebtItem(
+        item="缓存未失效", verdict=TechDebtVerdict.DIRECT_MATCH,
+        evidence_level=EvidenceLevel.B, source_refs=["kb-unknown"])])
+    cleaned = sanitize_report(r, valid_refs=_ALL, ref_doc_types=TYPES)
+    item = cleaned.tech_debt[0]
+    assert item.evidence_level == EvidenceLevel.C
+    # 判定必须一并降级：闸门按 verdict 求值，只降 level 会让 C 级证据继续阻断
+    assert item.verdict == TechDebtVerdict.POSSIBLE
+
+
+def test_incompatible_refs_stripped_when_compatible_one_present():
+    """部分引用类型契合时保留强结论，并剥离类型不相关的引用。"""
+    r = CheckReport(meta=_meta(), tech_debt=[TechDebtItem(
+        item="缓存未失效", verdict=TechDebtVerdict.DIRECT_MATCH,
+        evidence_level=EvidenceLevel.B, source_refs=["kb-rule", "kb-debt"])])
+    cleaned = sanitize_report(r, valid_refs=_ALL, ref_doc_types=TYPES)
+    item = cleaned.tech_debt[0]
+    assert item.evidence_level == EvidenceLevel.B
+    assert item.source_refs == ["kb-debt"]
+
+
+def test_weak_level_untouched_by_doc_type_rule():
+    """C 级条目不依赖来源，规则 4 不得改动其等级与引用。"""
+    r = CheckReport(meta=_meta(), tech_debt=[TechDebtItem(
+        item="缓存", verdict=TechDebtVerdict.POSSIBLE, evidence_level=EvidenceLevel.C,
+        source_refs=["kb-rule"])])
+    cleaned = sanitize_report(r, valid_refs=_ALL, ref_doc_types=TYPES)
+    item = cleaned.tech_debt[0]
+    assert item.evidence_level == EvidenceLevel.C
+    assert item.source_refs == ["kb-rule"]
+
+
+def test_rule4_skipped_when_no_doc_types_supplied():
+    """不提供 ref_doc_types 时跳过规则 4（兼容不感知类型的旧调用方）。"""
+    r = CheckReport(meta=_meta(), tech_debt=[TechDebtItem(
+        item="缓存", verdict=TechDebtVerdict.DIRECT_MATCH, evidence_level=EvidenceLevel.B,
+        source_refs=["kb-rule"])])
+    cleaned = sanitize_report(r, valid_refs=_ALL)
+    assert cleaned.tech_debt[0].evidence_level == EvidenceLevel.B
+
+
+def test_validate_report_flags_wrong_doc_type():
+    """validate_report 必须能报出类型错配，否则降级过程不可观测。"""
+    r = CheckReport(meta=_meta(), tech_debt=[TechDebtItem(
+        item="Java 正则捕获组错误", verdict=TechDebtVerdict.DIRECT_MATCH,
+        evidence_level=EvidenceLevel.B, source_refs=["kb-rule"])])
+    issues = validate_report(r, valid_refs=_ALL, ref_doc_types=TYPES)
+    assert any("来源类型不支持该段落" in i for i in issues), issues

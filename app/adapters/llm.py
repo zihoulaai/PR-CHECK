@@ -190,7 +190,8 @@ class LLMClientImpl:
                 logger.warning("llm_response_format_rejected from=%s fallback=%s",
                                fmt["type"] + ("/strict" if fmt.get("json_schema", {})
                                               .get("strict") else ""),
-                               self._formats[i + 1]["type"] if i + 1 < len(self._formats) else "none")
+                               self._formats[i + 1]["type"]
+                               if i + 1 < len(self._formats) else "none")
         raise LlmUnavailable("LLM 请求失败：所有 response_format 均被拒绝。") from last_err
 
     def _request(self, system: str, user: str, response_format: dict) -> str:
@@ -222,7 +223,8 @@ class LLMClientImpl:
                         json=payload,
                     )
                 if resp.status_code >= 400:
-                    # 400 且响应体指向 response_format → 该服务端/模型不支持 json_schema，交给 complete 降级
+                    # 400 且响应体指向 response_format → 该服务端/模型不支持
+                    # json_schema，交给 complete 降级
                     if resp.status_code == 400 and response_format.get("type") == "json_schema" \
                             and _looks_like_unsupported_format(resp):
                         raise _FormatUnsupported()

@@ -119,7 +119,8 @@ def _sample_diff(tmp_path: str) -> str:
     from pathlib import Path
     p = Path(tmp_path) / "pr.diff"
     p.write_text(
-        "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-    return 1\n+    return 2\n",
+        "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n"
+        "@@ -1 +1 @@\n-    return 1\n+    return 2\n",
         encoding="utf-8",
     )
     return str(p)

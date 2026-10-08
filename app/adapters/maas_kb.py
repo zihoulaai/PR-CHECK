@@ -89,7 +89,7 @@ class MaaSVectorKBAdapter:
             raise KbError(f"知识库返回了非 JSON 响应：{exc}") from exc
         return doc_id
 
-    def delete(self, doc_id: str) -> None:
+    def delete(self, doc_id: str, *, project: str = "") -> None:
         try:
             with self._client() as c:
                 resp = c.post(
@@ -102,9 +102,10 @@ class MaaSVectorKBAdapter:
             raise KbError(f"知识库文档删除失败：{exc}") from exc
 
 
-def _to_hits(data, project: str) -> list[KBHit]:  # pragma: no cover - 兼容别名
+def _to_hits(data, project: str) -> list[KBHit]:  # pragma: no cover
     return parse_hits(data, project)
 
 
-def _build_query_text(query: KBQuery) -> str:  # pragma: no cover - 兼容别名
-    return build_query_text(query)
+# pragma: no cover - 兼容别名
+def _build_query_text(query: KBQuery, max_chars: int | None = None) -> str:
+    return build_query_text(query, max_chars=max_chars)

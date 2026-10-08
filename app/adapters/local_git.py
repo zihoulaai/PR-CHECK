@@ -42,10 +42,12 @@ class LocalGitAdapter:
 
     platform = Platform.LOCAL
 
-    def list_projects(self, cred: GitCredential, *, search=None, page=1, per_page=20):
+    def list_projects(self, cred: GitCredential, *, search=None, page=1,
+                      per_page=20):
         return []
 
-    def list_mrs(self, cred: GitCredential, proj: ProjectRef, *, state="opened", page=1, per_page=20):
+    def list_mrs(self, cred: GitCredential, proj: ProjectRef, *, state="opened",
+                 page=1, per_page=20):
         return []
 
     def get_mr(self, cred: GitCredential, ref: MRRef) -> PRMetadata:

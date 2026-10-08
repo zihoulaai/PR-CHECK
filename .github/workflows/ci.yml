@@ -1,0 +1,71 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: 单测 + 评估 + lint + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --extra dev
+
+      # make ci = test + eval + eval-adv + lint + typecheck
+      # 与本地门禁同一入口，避免 CI 与本地跑出两套结果。
+      - name: 本地同款门禁
+        run: uv run make ci
+
+      - name: ruff（显式复核，避免 make 目标被改动时静默跳过）
+        run: uv run ruff check app tests
+
+      - name: mypy
+        run: uv run make typecheck
+
+      # 变异检测（tests/mutation_check.py）刻意**不在**本 job：
+      # 18 个变异体每个都要跑一遍 pytest + 评估，约 7~10 分钟。
+      # 它捕捉的是「重构悄悄削弱了测试」——任何测试都不会变红，只有注入缺陷才会
+      # 暴露，因此适合定时跑而非每次 PR 跑。见 mutation.yml。
+
+  package:
+    name: 打包可用性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - run: uv sync --extra dev
+
+      # 验证 wheel 能构建且包含包内资源（app/hooks/pre-push 随包分发）。
+      # 只构建不发布：发版是显式动作，不挂在 CI 上。
+      - name: 构建 sdist + wheel
+        run: uv run python -m build
+
+      - name: 确认钩子模板随包分发
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, zipfile
+          wheels = glob.glob("dist/*.whl")
+          assert wheels, "未产出 wheel"
+          names = zipfile.ZipFile(wheels[0]).namelist()
+          assert "app/hooks/pre-push" in names, \
+              f"app/hooks/pre-push 未随包分发：{sorted(n for n in names if 'hooks' in n)}"
+          print("OK: app/hooks/pre-push 已在 wheel 内")
+          PY

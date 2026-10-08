@@ -14,6 +14,12 @@ from app.parser.diff_parser import ParsedFile, get_language_parser
 
 # 用于关键词提取的分词（去掉常见标点）
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# 连续 CJK 片段。中文没有空格，但**路径天然分段**：`/退款/退款控制器.java` 会被
+# `/` 与 `.` 切开，得到「退款」「退款控制器」两个完整词——路径是中文项目里最可靠的
+# 中文信号。
+_CJK_RUN_RE = re.compile(r"[一-鿿]+")
+# 单个来源贡献的 CJK token 上限，防止长描述挤占 40 个关键词的预算
+_CJK_TOKENS_PER_SOURCE = 6
 
 # 变更类型 → ChangeProfile 中对应的文件清单字段。
 # 只有会流向 KB 检索（KBQuery）的类型才登记；未登记的类型仍计入 change_types，
@@ -33,14 +39,41 @@ _TYPE_TO_FIELD = {
 _FOCUS_FEATURES = set(HighImpactFeature)
 
 
+def _cjk_tokens(text: str, limit: int = _CJK_TOKENS_PER_SOURCE) -> list[str]:
+    """从文本中提取中文片段，作为关键词。
+
+    为什么必须单独处理：``_TOKEN_RE`` 只认 ASCII 标识符，中文 PR 的标题 / 描述 /
+    中文路径里没有任何 ASCII 词——此前它们的贡献恒为 0。对中文团队而言这是把最
+    关键的一路信号排除在 KB 检索之外（``build_query_text`` 里有 ``PR：{title}``，
+    但**没有描述，也没有中文路径段**）。
+
+    按连续 CJK 片段切分，不做 2 字滑窗：中文没有空格，滑窗会产出大量跨词垃圾
+    （「与缓」「的缓」），实测反而稀释了真正有信号的片段。片段整体保留即可——
+    KB 检索是语义匹配，完整短语的信息量高于破碎窗口。
+    """
+    out: list[str] = []
+    for run in _CJK_RUN_RE.findall(text or ""):
+        if len(run) >= 2:  # 单字片段信息量过低
+            out.append(run)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _extract_keywords(symbols: list[Symbol], files: list[FileChange], pr: PRMetadata) -> list[str]:
     raw: list[str] = []
     for s in symbols:
         raw.append(s.name)
+    # 中文路径段排在标题 / 描述之前：路径分段天然可靠（`/退款/Refund.java`），
+    # 而标题描述往往是整句、无空格，只能切出长片段。
     for f in files:
-        raw.extend(re.findall(_TOKEN_RE, f.path))
-    raw.extend(re.findall(_TOKEN_RE, pr.title))
-    raw.extend(re.findall(_TOKEN_RE, pr.description))
+        raw.extend(_cjk_tokens(f.path, limit=3))
+    raw.extend(_cjk_tokens(pr.title))
+    raw.extend(_cjk_tokens(pr.description))
+    for f in files:
+        raw.extend(_TOKEN_RE.findall(f.path))
+    raw.extend(_TOKEN_RE.findall(pr.title))
+    raw.extend(_TOKEN_RE.findall(pr.description))
     seen: set[str] = set()
     out: list[str] = []
     for tok in raw:
@@ -55,6 +88,33 @@ def _extract_keywords(symbols: list[Symbol], files: list[FileChange], pr: PRMeta
     return out[:40]
 
 
+def _rank_modules(files: list[FileChange],
+                  impact_by_module: dict[str, int]) -> list[str]:
+    """按相关性排序模块，而不是字典序。
+
+    为什么要改：``modules`` 会被 KBQuery 截断（``modules[:10]``）。字典序下
+    「改动 200 行的支付模块」可能排在「只改 1 行的 zzz 工具目录」之后而被截掉，
+    于是检索 query 里恰好缺了最该命中的那个模块——截断把最有信息量的部分先扔掉。
+
+    排序键：命中高影响特征的文件数 > 变更行数 > 文件数 > 名称（仅用于稳定排序，
+    保证多次运行结果一致）。
+    """
+    lines_by_module: dict[str, int] = {}
+    count_by_module: dict[str, int] = {}
+    for f in files:
+        if not f.module:
+            continue
+        lines_by_module[f.module] = lines_by_module.get(f.module, 0) + f.additions + f.deletions
+        count_by_module[f.module] = count_by_module.get(f.module, 0) + 1
+    return sorted(
+        count_by_module,
+        key=lambda m: (-impact_by_module.get(m, 0),
+                       -lines_by_module.get(m, 0),
+                       -count_by_module[m],
+                       m),
+    )
+
+
 def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
                          settings: Settings | None = None) -> ChangeProfile:
     settings = settings or get_settings()
@@ -62,7 +122,8 @@ def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
     symbols: list[Symbol] = []
     change_types: list[ChangeType] = []
     high_impact: list[HighImpactFeature] = []
-    modules: set[str] = set()
+    # 模块 → 命中高影响特征的文件数（_rank_modules 的排序键之一）
+    impact_by_module: dict[str, int] = {}
     per_type: dict[str, list[str]] = {f: [] for f in _TYPE_TO_FIELD.values()}
 
     for pf in parsed:
@@ -71,8 +132,6 @@ def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
             deletions=pf.deletions, module=pf.module, language=pf.language or "",
         )
         files.append(fc)
-        if pf.module:
-            modules.add(pf.module)
 
         lang_parser = get_language_parser(pf.language)
         if lang_parser is not None:
@@ -93,6 +152,8 @@ def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
             bucket = _TYPE_TO_FIELD.get(ct)
             if bucket is not None:
                 per_type[bucket].append(pf.path)
+        if his and pf.module:
+            impact_by_module[pf.module] = impact_by_module.get(pf.module, 0) + 1
 
     # 去重并保持出现顺序（Pydantic 模型不可哈希，需按关键字段去重）
     def _dedup_enums(seq):
@@ -120,7 +181,7 @@ def build_change_profile(pr: PRMetadata, parsed: list[ParsedFile],
         added_files=sum(1 for f in files if f.status == "added"),
         deleted_files=sum(1 for f in files if f.status == "deleted"),
         renamed_files=sum(1 for f in files if f.status == "renamed"),
-        modules=sorted(modules),
+        modules=_rank_modules(files, impact_by_module),
         files=files,
         symbols=uniq_symbols,
         change_types=_dedup_enums(change_types),

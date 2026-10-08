@@ -6,15 +6,20 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
 
-from app.adapters.base import GitPlatformAdapter
+from app.adapters.base import GitPlatformAdapter, KnowledgeBase, LLMClient
 from app.domain.enums import Platform
 
 
 class Container:
-    def __init__(self, git: Optional[GitPlatformAdapter] = None,
-                 llm: object | None = None, kb: object | None = None):
+    def __init__(self, git: GitPlatformAdapter | None = None,
+                 llm: LLMClient | None = None, kb: KnowledgeBase | None = None):
+        """llm / kb 用协议类型而非 ``object``。
+
+        标成 object 时所有下游调用（``container.kb.delete(...)``、``container.llm
+        .complete(...)``）都失去静态检查——类型洞会一路掩盖到运行时才暴露。
+        Fake 适配器按结构化子类型天然满足这两个 Protocol，无需显式继承。
+        """
         self._git = git
         self.llm = llm
         self.kb = kb
@@ -23,11 +28,11 @@ class Container:
             self.git_adapters[Platform.LOCAL.value] = git
 
     @property
-    def git(self) -> Optional[GitPlatformAdapter]:
+    def git(self) -> GitPlatformAdapter | None:
         return self._git
 
     @git.setter
-    def git(self, value: Optional[GitPlatformAdapter]) -> None:
+    def git(self, value: GitPlatformAdapter | None) -> None:
         self._git = value
         if value is not None:
             # 兼容旧单测：直接注入 container.git 即视为本地适配器
@@ -45,6 +50,11 @@ def _build_default() -> Container:
     s = get_settings()
     use_fake = os.getenv("PR_CHECK_USE_FAKE") == "1"
 
+    # 显式标注：否则 mypy 会用第一个分支的类型（FakeLLM / FakeKB）锁死变量类型，
+    # 真实实现分支就会被判为不兼容。
+    llm: LLMClient | None
+    kb: KnowledgeBase | None
+
     if use_fake:
         # 仅 LLM / KB 走 Fake；本地 Git 适配器保持真实（直连 .git），--fake 不影响 --repo 自检
         llm = FakeLLM()
@@ -54,8 +64,14 @@ def _build_default() -> Container:
         from app.adapters.registry import build_kb
         from app.domain.schemas import ReportSections
 
+        # model / api_key 用 `or ""` 兜底：构造签名要求 str，而配置项允许为空。
+        # 两种写法在运行时都会因「只配了 base_url」而被服务端拒绝并落到 LlmError
+        # （退出码 5），故不改变实际行为，只是把「把 None 传进 str 参数」这一潜在
+        # 类型错误消掉。是否改成三项齐备才构建（等价 is_llm_configured）属行为变更，
+        # 不在 lint 范围内，需要时单独评估。
         llm = LLMClientImpl(
-            base_url=s.llm_base_url, model=s.llm_model, api_key=s.llm_api_key,
+            base_url=s.llm_base_url, model=s.llm_model or "",
+            api_key=s.llm_api_key or "",
             timeout=s.llm_timeout_seconds, max_retries=s.llm_max_retries,
             # 结构化输出：服务端按 Schema 约束形状；不支持时客户端自动降级 json_object
             response_schema=ReportSections.model_json_schema(),

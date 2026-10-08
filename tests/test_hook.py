@@ -66,9 +66,9 @@ def test_hook_install_source_layout_writes_cli_path(repo):
     rc = main(["hook", "install", "--project", "team/order"])
     assert rc == 0
 
-    cfg = open(os.path.join(repo, ".pr-check.hook"), "r", encoding="utf-8").read()
+    cfg = open(os.path.join(repo, ".pr-check.hook"), encoding="utf-8").read()
     assert "PR_CHECK_CLI=" in cfg
-    cli_path = [l for l in cfg.splitlines() if l.startswith("PR_CHECK_CLI=")]
+    cli_path = [ln for ln in cfg.splitlines() if ln.startswith("PR_CHECK_CLI=")]
     assert cli_path and os.path.isfile(cli_path[0].split('"')[1])
     assert f'PR_CHECK_MODULE="{CLI_MODULE}"' in cfg
     assert 'PR_CHECK_PROJECT="team/order"' in cfg
@@ -83,7 +83,7 @@ def test_hook_install_packaged_layout_uses_module(repo, monkeypatch):
     rc = main(["hook", "install", "--project", "team/order"])
     assert rc == 0
 
-    cfg = open(os.path.join(repo, ".pr-check.hook"), "r", encoding="utf-8").read()
+    cfg = open(os.path.join(repo, ".pr-check.hook"), encoding="utf-8").read()
     assert "PR_CHECK_CLI=" not in cfg
     assert f'PR_CHECK_MODULE="{CLI_MODULE}"' in cfg
     assert os.path.isfile(os.path.join(repo, ".git", "hooks", "pre-push"))

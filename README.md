@@ -150,7 +150,14 @@ GitLab CI 完整示例（贴评论 + artifact）见 `docs/USAGE.md §13`。
 pr-check kb upload --file api.md --project team/order \
     --doc-type api_document --module pay --title "支付接口"
 pr-check kb list --project team/order
+pr-check kb list --remote      # 列出向量库侧实际内容，managed=false 即无主文档
+pr-check kb delete --id <ID> --force   # 清理无主文档（默认只删本工具上传过的 id）
 ```
+
+> **无主文档**（他人上传 / 元数据丢失 / 迁移遗留）默认既不显示也删不掉，却会被检索
+> 命中并作为证据进入报告。`kb list --remote` 是发现它们的唯一途径。同一个 dataset
+> 混放多个项目时尤其要注意：它们没有 `[project]` 归属标记，隔离强度不足以支撑跨项目
+> 的 A 级证据。详见 `docs/knowledge/UPLOAD.md §排查「无主文档」`。
 
 知识库生命周期闭环（R1，均**只读**、不依赖向量库凭据）：
 
@@ -166,6 +173,31 @@ pr-check feedback --report-id <id> --item risk:0 --label fp   # 标记误报 / �
 pr-check metrics --project team/order                         # 误报率 / 有用率 + 闸门命中统计
 PR_CHECK_CACHE=1 pr-check check --repo . && pr-check cache clear   # 缓存命中报告，clear 清空
 ```
+
+### 按项目分库（多项目共用一份凭据）
+
+一个知识库里混放多个项目的文档时，检索会把**别的项目的规范**一起召回，并被当作
+本项目的 A/B 级证据写进报告。因此每个项目应有独立知识库：
+
+```bash
+# 一份凭据 + 每项目一个 dataset id
+KB_DATASET_MAP='{"team/order":"<dataset-id-1>","pr-check":"<dataset-id-2>"}'
+
+pr-check kb upload --file api.md --project team/order --doc-type api_document
+pr-check config show     # kb_routing=per_project / kb_datasets 列出绑定情况
+```
+
+| 配置 | 行为 |
+|---|---|
+| 不设 `KB_DATASET_MAP` | 所有项目走 `KB_INDEX`（单库），既有用户零改动 |
+| 设置了 | **严格路由**：项目必须命中映射，否则 `kb_status=no_dataset`，报告与闸门会明确提示「本项目未绑定知识库」 |
+
+`no_dataset` 与「压根没配 KB」（`not_configured`）刻意分开：两者都表现为「没有知识段落」，
+但运维含义完全不同——后者是「没配」，前者是「配了多库却忘了给这个项目建」。
+
+> 之所以不用「服务端按 project 字段过滤」：Dify 的 `metadata_filtering` 实测**接受参数但
+> 静默忽略**（必然不匹配的条件仍照常返回记录），且文档无法携带 project 元数据
+> （`documents/{id}` 响应无 metadata 字段，`documents/{id}/metadata` 端点 404）。
 
 ---
 
@@ -215,6 +247,7 @@ PR_CHECK_CACHE=1 pr-check check --repo . && pr-check cache clear   # 缓存命�
 | `LLM_TIMEOUT_SECONDS` | 单次 LLM 请求超时（秒），默认 120 | 否 |
 | `LLM_ENABLE_THINKING` | 推理模型思维链输出：留空 = 不发送该字段；`false` 可显著降低延迟与 token | 否 |
 | `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | 向量知识库（项目知识库）；端点/鉴权结构由 `KB_PROVIDER` 决定 | 否 |
+| `KB_DATASET_MAP` | **按项目分库**：JSON `{"<project>":"<dataset-id>"}`，一份凭据、每项目一个独立知识库。**配置后进入严格路由**：项目未命中映射即`kb_status=no_dataset`，绝不回落到 `KB_INDEX`。不配置则所有项目走 `KB_INDEX`（既有用户零改动） | 否 |
 | `KB_PROVIDER` | 知识库供应商：`maas`（默认）/ `openai`（通用 OpenAI 风格检索）/ `dify`（Dify 知识库，`KB_INDEX` 承载 dataset_id） | 否（默认 `maas`） |
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |
@@ -234,8 +267,47 @@ PR_CHECK_CACHE=1 pr-check check --repo . && pr-check cache clear   # 缓存命�
 ```bash
 uv run pytest -q                        # 单测（parser/evidence/kb_query/workflow/cli/kb/local-git）
 uv run python tests/eval_harness.py     # 离线评估指标（Fake 模式，可复现）
+uv run python tests/eval_harness.py --adversarial --strict   # 对抗模式：用违规 LLM 输出验证证据清洗
 uv run python tests/eval_harness.py --real   # 真实 LLM 回归集（需配 LLM_* 三件套）
 ```
+
+### 开发门禁
+
+`make ci` 是**本地与 CI 的同一入口**（`.github/workflows/ci.yml` 调的就是它）：
+
+```bash
+uv sync --extra dev
+make ci              # = test + eval + eval-adv + lint + typecheck
+make lint            # ruff（配置在 pyproject [tool.ruff]）
+make typecheck       # mypy 卡门目录
+make typecheck-full  # mypy 全量（信息用，不设卡门）
+make mutation-check  # 变异检测（约 7~10 分钟）
+```
+
+**mypy 是分档接入的**，只对实测 0 error 的目录设卡门：
+
+| 范围 | error 数 | 是否卡门 |
+|---|---|---|
+| `app/domain` `app/report` `app/parser` `app/container.py` `app/cli.py` | 0 | 是 |
+| `app/storage` | 5（均在 `repo.py`，多为 SQLModel 动态属性的类型摩擦） | 否 |
+| `app/agent` | 17（`gate.py`/`evidence.py` 循环变量跨类型复用） | 否 |
+| `app/adapters` | 15（`Protocol` 变型、`model_copy` 弱返回值） | 否 |
+
+`tests/` 不做类型检查（94% 未标注，逐个补是纯体力活且几乎不产生缺陷发现）。
+
+### 变异检测：为什么测试全绿还不够
+
+`tests/mutation_check.py` 会逐个注入已知缺陷（破坏一处真实逻辑），再跑 pytest 与评估两层，看**是否被抓到**：
+
+```bash
+uv run python tests/mutation_check.py          # 全量（18 个变异体）
+uv run python tests/mutation_check.py --list   # 清单
+uv run python tests/mutation_check.py --only 5 # 只跑第 5 个
+```
+
+它捕捉的是「重构悄悄削弱了测试」——这类问题**不会让任何测试变红**，只有主动注入缺陷才会暴露。本项目历史上出现过「353 个测试全绿、但 Java 符号抽取实际全错」的状态（测试覆盖了调用链，却没有一条断言真正校验被调用的逻辑）。
+
+因耗时较长，它由 `.github/workflows/mutation.yml` 每日定时 + 手动触发，不挂 PR。
 
 **配置来源（优先级从高到低）**：当前目录 `.env` → 用户级 `%APPDATA%\pr-check\.env`（Linux/macOS 为 `$XDG_CONFIG_HOME/pr-check/.env`）→ 包/源码目录 `.env`。装机形态推荐把凭据放到用户级，避免每个仓库复制一份。
 

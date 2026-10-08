@@ -43,6 +43,7 @@ cp .env.example .env          # 填写可选的 LLM/KB
 | `LLM_TIMEOUT_SECONDS` | 单次 LLM 请求超时（秒），默认 120 | 否 |
 | `LLM_ENABLE_THINKING` | 推理模型是否输出思维链：留空=不发送该字段（兼容不支持的端点）；false=关闭（显著降低延迟与 token） | 否 |
 | `KB_BASE_URL` / `KB_API_KEY` / `KB_INDEX` | 向量知识库（项目知识库）；端点/鉴权结构由 `KB_PROVIDER` 决定 | 否 |
+| `KB_DATASET_MAP` | **按项目分库**：JSON `{"<project>":"<dataset-id>"}`，一份凭据、每项目一个独立知识库。**配置后进入严格路由**：项目未命中映射即`kb_status=no_dataset`，绝不回落到 `KB_INDEX`。不配置则所有项目走 `KB_INDEX`（既有用户零改动） | 否 |
 | `KB_PROVIDER` | 知识库供应商：`maas`（默认，MaaS Vector KB）/ `openai`（通用 OpenAI 风格检索，自建 RAG 或兼容 OpenAI embeddings+search 的服务） | 否（默认 `maas`） |
 | `SMALL_MAX_FILES` / `SMALL_MAX_LINES` | 三档模式的「完整分析」阈值 | 否 |
 | `MEDIUM_MAX_FILES` / `MEDIUM_MAX_LINES` | 三档模式的「聚焦分析」阈值 | 否 |

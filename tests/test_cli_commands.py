@@ -11,6 +11,7 @@ import json
 import pytest
 
 from app.cli import cmd_kb
+from app.errors import KbError, ValidationError
 
 
 def _ns(**over):
@@ -211,7 +212,8 @@ def test_kb_delete_provider_failure_keeps_meta(container, capsys, tmp_path, monk
     assert cmd_kb(ns) == 0
     doc_id = json.loads(capsys.readouterr().out)["id"]
 
-    def boom(_id):
+    # 签名与真实适配器一致（delete 带可选 project 关键字，供按项目分库路由）
+    def boom(_id, *, project=""):
         raise KbError("供应商删除失败")
 
     monkeypatch.setattr(container.kb, "delete", boom)
@@ -221,3 +223,90 @@ def test_kb_delete_provider_failure_keeps_meta(container, capsys, tmp_path, monk
     # 元数据仍在
     assert cmd_kb(_ns(kb_action="list", project=None, module=None, doc_type=None)) == 0
     assert [d["id"] for d in json.loads(capsys.readouterr().out)] == [doc_id]
+
+
+# ===== kb delete --force：清理非本工具管理的文档 =====
+def _del_ns(doc_id: str, *, force: bool = False):
+    return _ns(kb_action="delete", doc_id=doc_id, force=force)
+
+
+def _fake_kb_with(container, doc_id: str):
+    """向量库里有这篇文档，但本地 KbDoc 注册表里没有（无主文档）。"""
+    from app.adapters.fakes import FakeKB
+
+    kb = FakeKB()
+    container.kb = kb
+    kb.add_doc(id=doc_id, title="他人上传的文档", doc_type="technical_debt",
+               module="pay", project="team/order", snippet="遗留内容")
+    return kb
+
+
+def test_delete_rejects_unmanaged_id_by_default(container):
+    """默认护栏：本地注册表里没有的 id 一律拒绝，且不碰向量库。"""
+    kb = _fake_kb_with(container, "orphan-doc")
+    with pytest.raises(ValidationError) as exc:
+        cmd_kb(_del_ns("orphan-doc"))
+    assert "--force" in str(exc.value)
+    assert len(kb._docs) == 1, "被拒绝时不得动向量库"
+
+
+def test_delete_force_removes_unmanaged_doc(container):
+    """--force 允许清理无主文档（迁移遗留 / 他人上传 / 元数据丢失）。"""
+    kb = _fake_kb_with(container, "orphan-doc")
+    assert cmd_kb(_del_ns("orphan-doc", force=True)) == 0
+    assert kb._docs == []
+
+
+def test_delete_force_output_reports_flag(container, capsys):
+    _fake_kb_with(container, "orphan-2")
+    assert cmd_kb(_del_ns("orphan-2", force=True)) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "id": "orphan-2", "deleted": True,
+        "local_meta_removed": False, "forced": True}
+
+
+def test_delete_output_shape_unchanged_without_force(container, capsys, tmp_path):
+    """默认路径的输出结构不变：不为一个恒为 false 的字段改动消费方解析。"""
+    doc = tmp_path / "r.md"
+    doc.write_text("规范", encoding="utf-8")
+    assert cmd_kb(_ns(kb_action="upload", file=str(doc), project="team/order",
+                      doc_type="api_document", module="pay", title="规范")) == 0
+    doc_id = json.loads(capsys.readouterr().out)["id"]
+    assert cmd_kb(_del_ns(doc_id)) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "id": doc_id, "deleted": True, "local_meta_removed": True}
+
+
+# ===== kb list --remote：发现无主文档 =====
+def test_kb_list_remote_reports_unsupported_provider(container):
+    """供应商不支持列举时如实报错，而不是静默返回空表。"""
+    assert "list_documents" not in dir(container.kb)
+    with pytest.raises(KbError) as exc:
+        cmd_kb(_ns(kb_action="list", remote=True, project=None,
+                 module=None, doc_type=None, status=None))
+    assert "不支持列举" in str(exc.value)
+
+
+def test_kb_list_remote_marks_unmanaged_docs(container, capsys):
+    """managed=false 即无主文档：会被检索命中却无法用默认 delete 清理。"""
+    from app.adapters.fakes import FakeKB
+
+    kb = FakeKB()
+    container.kb = kb
+    kb.add_doc(id="managed-1", title="受管", doc_type="technical_debt", module="m",
+               project="team/order", snippet="s")
+    from app.domain.models import KbDoc
+    from app.storage.repo import insert_kb_doc
+
+    insert_kb_doc(KbDoc(id="managed-1", project="team/order", module="m",
+                        doc_type="technical_debt", title="受管"))
+    kb.list_documents = lambda: [
+        {"id": "managed-1", "name": "受管", "word_count": 1, "indexing_status": "completed"},
+        {"id": "orphan-9", "name": "无主", "word_count": 2, "indexing_status": "completed"},
+    ]
+    assert cmd_kb(_ns(kb_action="list", remote=True, project=None,
+                 module=None, doc_type=None, status=None)) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [r["managed"] for r in rows] == [True, False]
+    assert rows[1]["id"] == "orphan-9"
+    assert rows[1]["project"] == ""      # 本地无元数据，归属不可知

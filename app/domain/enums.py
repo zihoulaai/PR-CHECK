@@ -46,6 +46,11 @@ class KbStatus(str, Enum):
     SUCCESS = "success"
     EMPTY = "empty"
     FAILED = "failed"
+    # 按项目分库（KB_DATASET_MAP）时该项目未绑定任何知识库。
+    # 与 NOT_CONFIGURED 分开是刻意的：两者都表现为「没有知识段落」，但运维含义
+    # 完全不同——前者是「我没配 KB」，后者是「我配了多库，但忘了给这个项目建」。
+    # 混为一谈会让「以为已经按项目隔离」的误解长期潜伏。
+    NO_DATASET = "no_dataset"
 
 
 class EvidenceLevel(str, Enum):

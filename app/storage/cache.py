@@ -41,7 +41,7 @@ def prompt_version() -> str:
     return hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12]
 
 
-def make_cache_key(diff_text: str, model: str, kb_ids: "set[str]") -> str:
+def make_cache_key(diff_text: str, model: str, kb_ids: set[str]) -> str:
     """缓存键：prompt 版本 + model + KB 命中 id 集合（排序）+ diff 全文。"""
     basis = "|".join([
         prompt_version(), model or "",

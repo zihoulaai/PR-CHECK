@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from app.parser.base import LanguageParser, LineChange, _MODEL_PATTERNS
+from app.parser.base import LanguageParser, LineChange, is_data_model_path
 
 _CLASS_RE = re.compile(r"^\s*class\s+([A-Za-z_]\w*)")
 _DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)")
@@ -29,7 +29,7 @@ class PythonParser(LanguageParser):
     api_patterns = _API_PATTERNS
 
     def is_data_model_file(self, path: str, lines: list[LineChange]) -> bool:
-        if _MODEL_PATTERNS and any(p in path.lower() for p in _MODEL_PATTERNS):
+        if is_data_model_path(path):
             return True
         for lc in lines:
             low = lc.text.lower()

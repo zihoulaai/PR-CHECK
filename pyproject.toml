@@ -15,6 +15,8 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.11",
 ]
 
 [project.scripts]
@@ -32,3 +34,54 @@ packages = ["app"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
+
+# ===== lint（ruff）=====
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "BLE", "UP"]
+ignore = [
+    # UP042：把 `(str, Enum)` 换成 `StrEnum` 会改变 str() 的结果
+    # （`"RuleVerdict.OK"` → `"ok"`）。全库输出路径已统一走 `.value`，风险很低，
+    # 但这属于语义变更而非风格变更，收益不足以承担「报告文案静默改变」的风险。
+    # 等真的出现依赖 str(枚举成员) 的代码再评估。
+    "UP042",
+]
+# I（isort）暂不启用：tests/eval_harness.py 与 tests/mutation_check.py 必须在
+# 调整 sys.path 之后再 import app.*（否则 app 不在 path 上），靠 `# noqa: E402`
+# 容忍 import 不在顶部。开启 isort 会与这一约定冲突并产生大面积无意义重排。
+# 待这些文件改用包安装方式运行后再评估启用。
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里大量使用 assert 与直接构造领域对象，不受 lint 约束
+"tests/*" = ["B011"]
+# prompt.py 的主体是嵌入的提示词文本（SYSTEM_PROMPT 三引号字符串），行宽按「模型
+# 实际读到的排版」而非代码风格约束；折行会插入换行并改变发给模型的文本。
+# 而三引号字符串**内部无法写 # noqa**（注释进不了字符串），故只能整文件豁免。
+# 该文件里 prompt.py 的代码行仍由 E501 之外的其他规则覆盖。
+"app/agent/prompt.py" = ["E501"]
+# fakes.py 的主体是内嵌的 diff 样本字符串（DEFAULT_SAMPLE_DIFF 等三引号常量）。
+# 字符串内部无法写 # noqa，而手工折行会改动样本内容（diff 换行会被解析成新文件块），
+# 风险大于收益，故整文件豁免 E501；该文件的其余规则照常生效。
+"app/adapters/fakes.py" = ["E501"]
+
+# ===== 类型检查（mypy）=====
+# 分档接入：只对已达标目录设卡门，未达标目录留给 make typecheck-full 观察。
+# 实测（mypy 2.4.0，各目录单独运行）：
+#   app/domain + app/report + app/parser + app/container + app/cli : 0 error  ← 卡门
+#   app/storage                                                      : 5 error（均在 repo.py，
+#       多为 SQLModel 动态属性的类型摩擦，如 KbDoc.id.in_ 运行期可用但静态认不出）
+#   app/agent                                                        : 17 error
+#       （gate.py / evidence.py 里循环变量跨类型复用，evidence 契约区，不在 lint 范围内改）
+#   app/adapters                                                     : 15 error
+#       （Protocol 变型与 model_copy 弱返回值）
+# 不启用 --disallow-untyped-defs：tests 94% 未标注、agent/adapters 33%，
+# 全面强制标注是纯体力活且几乎不产生缺陷发现。
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+exclude = ['^tests/']
+warn_redundant_casts = true
+warn_unused_ignores = true

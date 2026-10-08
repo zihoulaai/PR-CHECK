@@ -96,7 +96,7 @@ def test_cli_missing_diff_invalid_request():
 def test_cli_stdin_pipe():
     """管道输入：--diff - 从 stdin 读取 diff。"""
     env = dict(os.environ, PR_CHECK_USE_FAKE="1")
-    with open(FIXTURE, "r", encoding="utf-8") as fh:
+    with open(FIXTURE, encoding="utf-8") as fh:
         diff_text = fh.read()
     proc = _run_module(["check", "--diff", "-", "--fake"], env, stdin=diff_text)
     assert proc.returncode == 0
@@ -156,7 +156,8 @@ def test_cli_check_md_omits_missing_location(container, capsys):
     """risk.location 缺省：静默省略，不占位不报错。"""
     container.llm = FakeLLM(report_override={
         "summary": "s",
-        "risk": [{"level": "high", "text": "注意事务边界", "evidence_level": "C", "source_refs": []}],
+        "risk": [{"level": "high", "text": "注意事务边界",
+                  "evidence_level": "C", "source_refs": []}],
     })
     rc = main(["check", "--diff", FIXTURE, "--format", "md"])
     assert rc == 0
@@ -195,7 +196,10 @@ def test_cli_ci_mode_writes_report_files_and_payload(capsys, tmp_path):
 
 
 def test_cli_ci_mode_gate_blocks_only_when_fail_on_given(capsys, tmp_path):
-    """--ci + 显式 --fail-on 命中：返回 7 且 payload blocked=true（非阻断模式把决定权交给流水线）。"""
+    """--ci + 显式 --fail-on 命中：返回 7 且 payload blocked=true。
+
+    非阻断模式把决定权交给流水线。
+    """
     from app.cli import EXIT_GATE
 
     out = tmp_path / "r.md"

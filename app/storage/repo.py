@@ -4,12 +4,12 @@
 """
 from __future__ import annotations
 
-from typing import Optional
 
 from sqlmodel import select
 
 from app.domain.models import AnalysisCache, GateEvent, KbDoc, ReportFeedback
 from app.storage.sqlite import session_scope
+from datetime import UTC
 
 
 # ===== KB 文档 metadata =====
@@ -21,9 +21,9 @@ def insert_kb_doc(doc: KbDoc) -> KbDoc:
         return doc
 
 
-def list_kb_docs(project: Optional[str] = None, module: Optional[str] = None,
-                 doc_type: Optional[str] = None,
-                 status: Optional[str] = None) -> list[KbDoc]:
+def list_kb_docs(project: str | None = None, module: str | None = None,
+                 doc_type: str | None = None,
+                 status: str | None = None) -> list[KbDoc]:
     with session_scope() as s:
         stmt = select(KbDoc)
         if project:
@@ -37,13 +37,27 @@ def list_kb_docs(project: Optional[str] = None, module: Optional[str] = None,
         return list(s.exec(stmt).all())
 
 
-def list_stale_doc_ids(project: Optional[str] = None) -> set[str]:
+def list_stale_doc_ids(project: str | None = None) -> set[str]:
     """已标记 stale（过期）的文档 id；检索时用于剔除不再生效的来源。"""
     with session_scope() as s:
         stmt = select(KbDoc).where(KbDoc.status == "stale")
         if project:
             stmt = stmt.where(KbDoc.project == project)
         return {d.id for d in s.exec(stmt).all()}
+
+
+def get_kb_docs_by_ids(ids) -> dict[str, KbDoc]:
+    """按 id 批量取 KB 文档元数据，返回 {id: KbDoc}。
+
+    供检索侧补齐供应商缺失的维度用：Dify 的检索片段不携带 project / doc_type /
+    module（见 adapters/dify_kb.py 的维度差异说明），但上传时本工具已按
+    document.id 落过完整元数据（cli._kb_upload_one），故可按 id 反查回填。
+    """
+    id_set = {i for i in ids if i}
+    if not id_set:
+        return {}
+    with session_scope() as s:
+        return {d.id: d for d in s.exec(select(KbDoc).where(KbDoc.id.in_(id_set))).all()}
 
 
 def delete_kb_doc(doc_id: str) -> bool:
@@ -60,8 +74,8 @@ def delete_kb_doc(doc_id: str) -> bool:
         return bool(result.rowcount)
 
 
-def mark_kb_docs_stale(project: str, module: Optional[str] = None,
-                       keep_ids: Optional[set[str]] = None) -> list[str]:
+def mark_kb_docs_stale(project: str, module: str | None = None,
+                       keep_ids: set[str] | None = None) -> list[str]:
     """把 project（+module）下不在 keep_ids 中的 active 文档标记为 stale，返回被标记的 id。
 
     语义：调用方（kb import --prune）以「本批即事实源」为准——目录里已不存在的文档
@@ -84,7 +98,7 @@ def mark_kb_docs_stale(project: str, module: Optional[str] = None,
 
 
 # ===== 反馈 / 闸门事件（R2） =====
-def _before_since(created_at: str, since: Optional[str]) -> bool:
+def _before_since(created_at: str, since: str | None) -> bool:
     """created_at 早于 since 下界（应排除）时返回 True；since 为空表示不过滤。"""
     return bool(since) and created_at < since
 
@@ -97,7 +111,7 @@ def upsert_feedback(rec: ReportFeedback) -> ReportFeedback:
         return rec
 
 
-def list_feedback(project: Optional[str] = None, since: Optional[str] = None
+def list_feedback(project: str | None = None, since: str | None = None
                   ) -> list[ReportFeedback]:
     with session_scope() as s:
         stmt = select(ReportFeedback)
@@ -115,7 +129,7 @@ def record_gate_event(ev: GateEvent) -> GateEvent:
         return ev
 
 
-def list_gate_events(project: Optional[str] = None, since: Optional[str] = None
+def list_gate_events(project: str | None = None, since: str | None = None
                      ) -> list[GateEvent]:
     with session_scope() as s:
         stmt = select(GateEvent)
@@ -126,7 +140,7 @@ def list_gate_events(project: Optional[str] = None, since: Optional[str] = None
 
 
 # ===== LLM 结果缓存（R3） =====
-def get_cache_entry(cache_key: str) -> Optional[AnalysisCache]:
+def get_cache_entry(cache_key: str) -> AnalysisCache | None:
     with session_scope() as s:
         return s.get(AnalysisCache, cache_key)
 
@@ -139,18 +153,18 @@ def put_cache_entry(entry: AnalysisCache) -> None:
 
 def touch_cache_entry(cache_key: str) -> None:
     """命中计数 +1（观测用；失败不影响自检主流程，由调用方兜住异常）。"""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     with session_scope() as s:
         entry = s.get(AnalysisCache, cache_key)
         if entry is not None:
             entry.hit_count += 1
-            entry.last_hit_at = datetime.now(timezone.utc).isoformat()
+            entry.last_hit_at = datetime.now(UTC).isoformat()
             s.add(entry)
             s.commit()
 
 
-def clear_cache(project: Optional[str] = None) -> int:
+def clear_cache(project: str | None = None) -> int:
     """清空缓存（可按 project 限定），返回删除条数。"""
     from sqlmodel import delete as sql_delete
 

@@ -13,7 +13,7 @@ import json
 import logging
 
 from app.adapters.base import GitCredential
-from app.agent.evidence import sanitize_report
+from app.agent.evidence import sanitize_report, validate_report
 from app.agent.kb_query import build_kb_query
 from app.agent.prompt import build_system_prompt, build_user_prompt
 from app.container import get_container, select_git_adapter
@@ -91,6 +91,8 @@ def _analyze(container, pr: PRMetadata, profile, parsed: list[ParsedFile],
     # 1) 知识库单次检索（失败降级为基础自检）
     kb_hits, kb_status = _search_kb(container, pr, profile, mode)
     valid_refs = {h.id for h in kb_hits}
+    # 来源类型随命中项带入 evidence 规则 4：真实命中但类型与结论无关时也必须降级。
+    ref_doc_types = {h.id: h.doc_type for h in kb_hits}
 
     # 2) LLM 综合（summary_only 或 LLM 未配置时，降级为基础风险报告）
     effective_mode = mode
@@ -104,7 +106,11 @@ def _analyze(container, pr: PRMetadata, profile, parsed: list[ParsedFile],
         cached = get_cached(cache_key)
         if cached is not None:
             cached.meta.cache_hit = True
-            return sanitize_report(cached, valid_refs=valid_refs)
+            cleaned = sanitize_report(cached, valid_refs=valid_refs,
+                                      ref_doc_types=ref_doc_types)
+            return _annotate_degradation(raw=cached, cleaned=cleaned,
+                                         valid_refs=valid_refs,
+                                         ref_doc_types=ref_doc_types)
 
     if effective_mode == AnalysisMode.SUMMARY_ONLY:
         report = _build_summary_only(
@@ -127,7 +133,45 @@ def _analyze(container, pr: PRMetadata, profile, parsed: list[ParsedFile],
                        getattr(container.llm, "model", "") or "", pr.project)
 
     # 3) Evidence 后校验：valid_refs 取本次真实命中的 id，杜绝伪造引用
-    return sanitize_report(report, valid_refs=valid_refs)
+    cleaned = sanitize_report(report, valid_refs=valid_refs,
+                              ref_doc_types=ref_doc_types)
+    return _annotate_degradation(raw=report, cleaned=cleaned,
+                                 valid_refs=valid_refs,
+                                 ref_doc_types=ref_doc_types)
+
+
+def _annotate_degradation(*, raw: CheckReport, cleaned: CheckReport,
+                          valid_refs: set[str],
+                          ref_doc_types: dict[str, str]) -> CheckReport:
+    """把证据规则的修正结果写进 meta，让降级对使用者可见。
+
+    此前 validate_report 只被单测调用——生产链路里所有降级、剥离、丢弃都是静默的：
+    用户看到的是一条干净的 C 级结论，却不知道自己给出的 A 级强结论因引用无效或
+    类型不支撑而被改掉了。降级本身是设计意图，但**不可见的降级**会让人误以为
+    模型原本就这么有把握。
+
+    必须对**清洗前**的 raw 求值：清洗后的报告已经没有违规项，对它求值会恒为 0，
+    等于什么都没统计。
+
+    degraded_count 恒填充（一个数字，成本可忽略）；evidence_issues 逐条较长，
+    仅在 PR_CHECK_DEBUG 开启时填充，同时打 stderr。
+    summary / manual_checklist 的清洗是无条件策略而非「降级事件」，故不计入。
+    """
+    issues = validate_report(raw, valid_refs=valid_refs,
+                             ref_doc_types=ref_doc_types)
+    cleaned.meta.degraded_count = len(issues)
+    if issues and _debug_enabled():
+        cleaned.meta.evidence_issues = issues
+        for line in issues:
+            logger.warning("evidence_degraded: %s", line)
+    return cleaned
+
+
+def _debug_enabled() -> bool:
+    import os
+
+    return os.environ.get("PR_CHECK_DEBUG", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def compute_report_id(pr: PRMetadata, diff_text: str) -> str:
@@ -141,7 +185,7 @@ def compute_report_id(pr: PRMetadata, diff_text: str) -> str:
     scope = (pr.project or pr.repository or "unknown").strip()
     branch = (pr.source_branch or "diff").strip() or "diff"
     digest = hashlib.sha256(
-        f"{scope}|{branch}|{pr.pr_id}|{diff_text}".encode("utf-8")
+        f"{scope}|{branch}|{pr.pr_id}|{diff_text}".encode()
     ).hexdigest()[:12]
     slug = lambda s: s.replace("/", "-").replace("\\", "-").replace(" ", "-")  # noqa: E731
     return f"{slug(scope)}-{slug(branch)}-{digest}"
@@ -158,6 +202,14 @@ def _search_kb(container, pr: PRMetadata, profile, mode: AnalysisMode):
     if container.kb is None or not pr.project:
         # 无 KB 配置或缺少 project（KBQuery.project 必填，禁止跨项目检索）
         return [], KbStatus.NOT_CONFIGURED
+    # 按项目分库且该项目未绑定知识库：与「压根没配 KB」区分开，否则运维无法发现
+    # 「配了多库却忘了给这个项目建」——那会让闸门静默永不触发。
+    from app.adapters.routing_kb import RoutingKB
+
+    if isinstance(container.kb, RoutingKB) and not container.kb.has_dataset(pr.project):
+        logger.warning("kb_no_dataset project=%s configured=%s",
+                       pr.project, container.kb.projects)
+        return [], KbStatus.NO_DATASET
     try:
         hits = container.kb.search(build_kb_query(pr, profile))
     except KbError as exc:
@@ -221,7 +273,8 @@ def _assemble(pr, profile, sections: ReportSections, kb_hits, mode, kb_status,
 
     # 无知识命中（未配置 / 空 / 检索失败）时，项目规范与技术债务段落必须为空，
     # 兑现「无知识不强判」的契约；否则 LLM 会凭空生成规范/债务条目污染报告。
-    no_kb = kb_status in (KbStatus.NOT_CONFIGURED, KbStatus.EMPTY, KbStatus.FAILED)
+    no_kb = kb_status in (KbStatus.NOT_CONFIGURED, KbStatus.EMPTY, KbStatus.FAILED,
+                        KbStatus.NO_DATASET)
 
     # kb_sources 由 source_refs 映射命中项；未命中源不列入（防止错误引用）
     seen_ids: set[str] = set()
@@ -263,7 +316,9 @@ def _build_summary_only(pr, profile, kb_status, *, mode: AnalysisMode | None = N
         # 没有可分析内容（空 diff）时不提示规模与高影响特征：不要谎报「规模较大」
         if not degraded_no_llm and profile.high_impact_features:
             risks.append(RiskItem(
-                level=RiskLevel.LOW, text="本次 PR 规模较大，已仅对重点变更做辅助分析，不代表完成完整代码审查。",
+                level=RiskLevel.LOW,
+                text="本次 PR 规模较大，已仅对重点变更做辅助分析，"
+                     "不代表完成完整代码审查。",
                 evidence_level=EvidenceLevel.C, source_refs=[],
             ))
         for f in profile.high_impact_features:
@@ -287,13 +342,15 @@ def _summary_from_profile(pr, profile, *, degraded_no_llm: bool = False) -> str:
             f"本次 PR「{pr.title}」未解析到可分析的代码变更"
             "（diff 为空、仅含二进制/权限变更，或 diff 格式无法识别），已跳过深度分析。"
         )
-    parts = [f"本次 PR「{pr.title}」共变更 {profile.changed_files} 个文件、{profile.changed_lines} 行。"]
+    parts = [f"本次 PR「{pr.title}」共变更 {profile.changed_files} 个文件、"
+             f"{profile.changed_lines} 行。"]
     if profile.change_types:
         parts.append("变更类型：" + "、".join(t.value for t in profile.change_types) + "。")
     if profile.modules:
         parts.append("涉及模块：" + "、".join(profile.modules) + "。")
     if degraded_no_llm:
-        parts.append("LLM 未配置，已降级为仅基础风险自检（无 LLM 综合段落）；其余段落缺失不代表无问题，请结合人工审查。")
+        parts.append("LLM 未配置，已降级为仅基础风险自检（无 LLM 综合段落）；"
+                     "其余段落缺失不代表无问题，请结合人工审查。")
     else:
         parts.append("因规模超过深度分析范围，本报告仅提供变更摘要与基础自查提醒，不代表已完成代码审查。")
     return "".join(parts)
