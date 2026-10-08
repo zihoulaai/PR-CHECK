@@ -68,17 +68,22 @@ ignore = [
 "app/adapters/fakes.py" = ["E501"]
 
 # ===== 类型检查（mypy）=====
-# 分档接入：只对已达标目录设卡门，未达标目录留给 make typecheck-full 观察。
-# 实测（mypy 2.4.0，各目录单独运行）：
-#   app/domain + app/report + app/parser + app/container + app/cli : 0 error  ← 卡门
-#   app/storage                                                      : 5 error（均在 repo.py，
-#       多为 SQLModel 动态属性的类型摩擦，如 KbDoc.id.in_ 运行期可用但静态认不出）
-#   app/agent                                                        : 17 error
-#       （gate.py / evidence.py 里循环变量跨类型复用，evidence 契约区，不在 lint 范围内改）
-#   app/adapters                                                     : 15 error
-#       （Protocol 变型与 model_copy 弱返回值）
-# 不启用 --disallow-untyped-defs：tests 94% 未标注、agent/adapters 33%，
-# 全面强制标注是纯体力活且几乎不产生缺陷发现。
+# 卡门范围：整个 app/，实测 0 error（mypy 2.4.0，45 个源文件）。
+#
+# 曾分档接入（domain/report/parser/cli 先进门、agent/adapters/storage 挂账），
+# 现已全部清零并把卡门扩到全 app。清零过程中修掉的都是真实问题，不是类型洁癖：
+#   - registry 用实例协议标注「适配器类」→ 一堆与真实错误无关的
+#     Unexpected keyword argument（拆出 Factory 协议解决）；
+#   - gate.py / evidence.py 四段循环复用同一个 `it` / `verdict`，mypy 按首段
+#     钉死类型；具名化后顺带让「这一段处理哪类条目」变得可读；
+#   - json_body 标注 object 导致下游任何遍历都报错 → 改 Any 并加 json_items()
+#     形状校验（原先 `data or []` 遇对象会静默当成「没数据」）；
+#   - SQLModel 字段静态类型就是普通 str/int，`KbDoc.id.in_(x)` 认不出 →
+#     统一走 col()（SQLModel 的类型化列入口），而不是逐处加 type: ignore；
+#   - maas_kb 同一符号在模块级被定义两次（别名 + 兼容函数）。
+#
+# 不启用 --disallow-untyped-defs：tests 94% 未标注，逐个补是纯体力活且几乎
+# 不产生缺陷发现（见 README「开发门禁」一节）。
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true

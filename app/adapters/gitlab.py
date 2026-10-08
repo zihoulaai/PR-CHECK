@@ -21,7 +21,7 @@ from app.adapters.base import (
     PRMetadata,
     ProjectItem,
 )
-from app.adapters.http_git import get, json_body, project_path, require_token
+from app.adapters.http_git import get, json_body, json_items, project_path, require_token
 from app.domain.enums import Platform
 from app.domain.schemas import MRRef, ProjectRef
 from app.errors import GitUnavailable, MrNotFound, ProjectNotFound
@@ -90,7 +90,7 @@ class GitLabAdapter:
                 path_with_namespace=r.get("path_with_namespace") or "",
                 web_url=r.get("web_url") or "",
             )
-            for r in (data or []) if isinstance(r, dict)
+            for r in json_items(data) if isinstance(r, dict)
         ]
 
     def list_mrs(self, cred: GitCredential, proj: ProjectRef, *, state="opened",
@@ -109,7 +109,7 @@ class GitLabAdapter:
                 updated_at=m.get("updated_at") or "",
                 author=(m.get("author") or {}).get("name") or "",
             )
-            for m in (data or []) if isinstance(m, dict)
+            for m in json_items(data) if isinstance(m, dict)
         ]
 
     def get_mr(self, cred: GitCredential, ref: MRRef) -> PRMetadata:

@@ -74,21 +74,26 @@ def evaluate_gate(report: CheckReport, specs: list[tuple[str, str]]) -> list[str
                     violations.append(f"风险等级 {r.level.value}：{r.text}")
                     break
         elif section == "rule":
-            verdict = RuleVerdict(value)
-            for it in report.project_rules:
-                if it.verdict == verdict:
-                    violations.append(f"规范违反：{it.item}")
+            # 三段的 verdict / 循环变量都分段具名：四个分支共用 `verdict` / `it` 时
+            # mypy 会按第一段把它们钉死成 RuleVerdict / RuleItem，后面三段全部报错；
+            # 具名化后既过检查，也读得出「这条规则查的是哪一段」。
+            rule_verdict = RuleVerdict(value)
+            for rule_item in report.project_rules:
+                if rule_item.verdict == rule_verdict:
+                    violations.append(f"规范违反：{rule_item.item}")
                     break
         elif section == "doc":
-            verdict = DocCheckVerdict(value)
-            for it in report.doc_check:
-                if it.verdict == verdict:
-                    violations.append(f"文档待处理：{it.item}（{it.verdict.value}）")
+            doc_verdict = DocCheckVerdict(value)
+            for dc_item in report.doc_check:
+                if dc_item.verdict == doc_verdict:
+                    violations.append(
+                        f"文档待处理：{dc_item.item}（{dc_item.verdict.value}）")
                     break
         elif section == "debt":
-            verdict = TechDebtVerdict(value)
-            for it in report.tech_debt:
-                if it.verdict == verdict:
-                    violations.append(f"技术债务命中：{it.item}（{it.verdict.value}）")
+            debt_verdict = TechDebtVerdict(value)
+            for debt_item in report.tech_debt:
+                if debt_item.verdict == debt_verdict:
+                    violations.append(
+                        f"技术债务命中：{debt_item.item}（{debt_item.verdict.value}）")
                     break
     return violations

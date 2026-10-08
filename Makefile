@@ -11,7 +11,7 @@ CLI       = $(PYTHON) -m app.cli
 
 .PHONY: help install install-dev test version \
         check kb-upload kb-list eval eval-adv eval-real \
-        lint typecheck typecheck-full mutation-check ci package clean
+        lint typecheck typecheck-tests mutation-check ci package clean
 
 help: ## 显示本帮助
 	@echo "可用目标（Windows 用户请用 Git Bash 运行）："
@@ -39,13 +39,12 @@ test: ## 运行全部单测
 lint: ## ruff 静态检查（配置见 pyproject [tool.ruff]）
 	$(PYTHON) -m ruff check app tests
 
-# mypy 卡门目录：实测 0 error 的部分先进门。
-# 变更范围时同步更新 pyproject.toml 里 [tool.mypy] 上方的实测数字说明。
-typecheck: ## mypy 类型检查（仅卡门目录）
-	$(PYTHON) -m mypy app/domain app/report app/parser app/container.py app/cli.py
+# 卡门范围是整个 app/（实测 0 error）。新增目录自动纳入，无需改这里。
+typecheck: ## mypy 类型检查（整个 app/，卡门）
+	$(PYTHON) -m mypy app
 
-typecheck-full: ## mypy 全量（信息用，不设卡门：agent/adapters/storage 尚有已知 error）
-	-$(PYTHON) -m mypy app
+typecheck-tests: ## mypy 覆盖 tests/（信息用，不设卡门：测试 94% 未标注）
+	-$(PYTHON) -m mypy --config-file=/dev/null --ignore-missing-imports tests
 
 version: ## 显示版本信息
 	$(CLI) version

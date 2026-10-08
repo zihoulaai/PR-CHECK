@@ -86,7 +86,8 @@ class RoutingKB:
     def adapter_for(self, project: str) -> KnowledgeBase:
         kb = self._per_project.get(project)
         if kb is None:
-            return NoDatasetConfigured(project, self._per_project)
+            # 传项目名列表而非 dict：_why() 要把它 join 成「已配置哪些项目」的提示
+            return NoDatasetConfigured(project, self.projects)
         return kb
 
     # ===== KnowledgeBase 协议 =====

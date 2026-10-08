@@ -71,8 +71,35 @@ class LLMClient(Protocol):
 
 @runtime_checkable
 class KnowledgeBase(Protocol):
+    """向量知识库。``project`` 必填且服务端按 project 过滤，拒绝跨项目检索。"""
+
     def search(self, query: KBQuery) -> list[KBHit]: ...
     def upload(self, doc: KbDocInput) -> str: ...
-    def delete(self, doc_id: str) -> None:
-        """删除知识库文档。供应商不支持时抛 KbError（能力边界显式化，不静默成功）。"""
+    def delete(self, doc_id: str, *, project: str = "") -> None:
+        """删除知识库文档。供应商不支持时抛 KbError（能力边界显式化，不静默成功）。
+
+        ``project`` 仅按项目分库时有用：``RoutingKB`` 用它选中目标库再委派下来。
+        单库适配器只服务一个 dataset，故忽略该参数——**不要**用它做过滤，
+        过滤是 RoutingKB 的职责，适配器层面过滤会与本地元数据不一致。
+        """
         ...
+
+
+@runtime_checkable
+class GitPlatformAdapterFactory(Protocol):
+    """Git 适配器的**构造**契约。
+
+    与 ``GitPlatformAdapter``（实例契约）分开：``registry.GIT_ADAPTERS`` 保存的是
+    **类**而不是实例，若按实例协议标注，mypy 会拿协议的空 ``__init__`` 去校验
+    ``cls(base_url=..., token=...)``，报出一堆「Unexpected keyword argument」——
+    与真实错误无关，纯属类型层次用错。
+    """
+
+    def __new__(cls, *args, **kwargs) -> GitPlatformAdapter: ...
+
+
+@runtime_checkable
+class KnowledgeBaseFactory(Protocol):
+    """知识库适配器的**构造**契约（同上，为 ``registry.PROVIDERS`` 而存在）。"""
+
+    def __new__(cls, *args, **kwargs) -> KnowledgeBase: ...

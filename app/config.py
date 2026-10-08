@@ -256,8 +256,10 @@ class Settings(BaseSettings):
         """
         if not (self.kb_dataset_map or "").strip():
             return self
+        # 上面已确认非空，这里仍传 `or ""`：`in` 判空无法让 mypy 收窄 Optional，
+        # 而 parse_dataset_map 内部对空串返回 {}，行为不受影响。
         try:
-            mapping = parse_dataset_map(self.kb_dataset_map)
+            mapping = parse_dataset_map(self.kb_dataset_map or "")
         except ValueError as exc:
             raise ValueError(
                 f"KB_DATASET_MAP 配置无效：{exc}。"

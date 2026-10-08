@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from typing import Any
 
 from app.adapters.base import (
     GitCredential,
@@ -82,7 +83,7 @@ class FakeGitPlatform:
         )]
 
     def get_mr(self, cred: GitCredential, ref: MRRef) -> PRMetadata:
-        base = {
+        base: dict[str, Any] = {
             "project": self.project_path, "repository": self.project_path,
             "pr_id": ref.iid, "title": "增加退款接口",
             "description": "支持订单部分退款", "source_branch": "feature/refund",

@@ -14,9 +14,10 @@ from app.adapters.query_text import build_query_text, parse_hits
 from app.domain.schemas import KBHit, KBQuery
 from app.errors import KbError
 
-# 向后兼容别名：旧单测仍从本模块 import 这两个符号
-_build_query_text = build_query_text
-_to_hits = parse_hits
+# 向后兼容别名：旧单测仍从本模块 import 这两个符号。
+# 定义放在文件末尾（见下方定义），此处不重复赋值——同名符号在模块级被定义两次
+# 会让 mypy 报 no-redef，且读者会误以为上面那份才是真正被调用的实现。
+__all__ = ["MaaSVectorKBAdapter", "parse_hits", "build_query_text"]
 
 
 class MaaSVectorKBAdapter:

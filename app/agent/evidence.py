@@ -21,7 +21,13 @@ valid_refs 为「本次允许引用的知识库 id 集合」，由 workflow 从 
 from __future__ import annotations
 
 from app.domain.enums import EvidenceLevel, RuleVerdict, TechDebtVerdict
-from app.domain.schemas import CheckReport
+from app.domain.schemas import (
+    CheckReport,
+    DocCheckItem,
+    RiskItem,
+    RuleItem,
+    TechDebtItem,
+)
 
 # 绝对化断言：这类短语无论有没有证据都不该出现在报告里。
 #
@@ -51,6 +57,10 @@ _WEAK_LEVELS = {EvidenceLevel.C, EvidenceLevel.N}
 # summary 与人工清单的清洗上限
 _SUMMARY_MAX_CHARS = 300
 _CHECKLIST_MAX_ITEMS = 15
+
+# 四个段落的条目类型在证据契约里是同构的（都有 evidence_level / source_refs，
+# 各自另有 item 或 text 字段），因此共用一组以 Union 标注的辅助函数。
+_AnyItem = DocCheckItem | RiskItem | RuleItem | TechDebtItem
 
 # 段落 → 可支撑该结论的来源文档类型（规则 4）。
 #
@@ -132,10 +142,10 @@ def validate_report(report: CheckReport, *, valid_refs: set[str],
     """返回违规说明列表；空列表表示通过。valid_refs / ref_doc_types 见模块 docstring。"""
     issues: list[str] = []
 
-    def _label(item) -> str:
+    def _label(item: _AnyItem) -> str:
         return getattr(item, "item", None) or getattr(item, "text", "") or "?"
 
-    def _check(item, section: str) -> None:
+    def _check(item: _AnyItem, section: str) -> None:
         """逐条检查，**每个条目最多产出一条说明**。
 
         产出一条而非多条的原因：degraded_count 需要等于「被修正的条目数」，
@@ -150,6 +160,10 @@ def validate_report(report: CheckReport, *, valid_refs: set[str],
             problems.append(f"引用了不存在的知识库来源 {unknown_refs}")
 
         # 规则 1-4 的判定复用 _resolve_evidence / _enforce_doc_type，与 sanitize_report 保持一致
+        # ref_doc_types 为 None 时 _enforce_doc_type 会原样返回（跳过规则 4），因此下面
+        # 两个分支在 None 下都走不到；但先归一化成空 dict，避免报告文案里的 .get()
+        # 在逻辑变化后变成潜在 AttributeError。
+        types_map = ref_doc_types or {}
         resolved = _resolve_evidence(item, valid_refs)
         if el in _STRONG_LEVELS and not (resolved[0] if resolved else []):
             problems.append(f"证据等级 {el.value} 缺少有效 source_refs")
@@ -160,7 +174,7 @@ def validate_report(report: CheckReport, *, valid_refs: set[str],
                 problems.append(
                     f"证据等级 {el.value} 的来源类型不支持该段落"
                     f"（可用 {sorted(_ALLOWED_DOC_TYPES.get(section, ()))}，"
-                    f"实际 {[(r, ref_doc_types.get(r, '?')) for r in resolved[0]]}）")
+                    f"实际 {[(r, types_map.get(r, '?')) for r in resolved[0]]}）")
             elif set(typed_refs) != set(resolved[0]):
                 problems.append(
                     f"含类型不相关的引用 {sorted(set(resolved[0]) - set(typed_refs))}")
@@ -179,19 +193,26 @@ def validate_report(report: CheckReport, *, valid_refs: set[str],
         if problems:
             issues.append(f"[{section}] {label}：{'；'.join(problems)}")
 
-    for it in report.doc_check:
-        _check(it, "doc_check")
-    for it in report.risk:
-        _check(it, "risk")
-    for it in report.project_rules:
-        _check(it, "project_rules")
-        if it.verdict.value == "violation" and it.evidence_level not in _STRONG_LEVELS:
-            issues.append(f"[project_rules] {it.item} 判定为 violation 但证据非 A/B")
-    for it in report.tech_debt:
-        _check(it, "tech_debt")
-        if it.verdict.value in ("direct_match", "related") and not any(
-                r in valid_refs for r in it.source_refs):
-            issues.append(f"[tech_debt] {it.item} 判定为 {it.verdict.value} 但缺少有效 source_refs")
+    # 四段用四个具名循环变量：原先复用同一个 `it`，mypy 会按首次循环把变量钉死成
+    # DocCheckItem，后面三段全部报类型不符。具名化后既过类型检查，也读得清
+    # 「这一段处理的是哪一类条目」。
+    for dc_item in report.doc_check:
+        _check(dc_item, "doc_check")
+    for risk_item in report.risk:
+        _check(risk_item, "risk")
+    for rule_item in report.project_rules:
+        _check(rule_item, "project_rules")
+        if rule_item.verdict.value == "violation" \
+                and rule_item.evidence_level not in _STRONG_LEVELS:
+            issues.append(
+                f"[project_rules] {rule_item.item} 判定为 violation 但证据非 A/B")
+    for debt_item in report.tech_debt:
+        _check(debt_item, "tech_debt")
+        if debt_item.verdict.value in ("direct_match", "related") and not any(
+                r in valid_refs for r in debt_item.source_refs):
+            issues.append(
+                f"[tech_debt] {debt_item.item} 判定为 {debt_item.verdict.value} "
+                f"但缺少有效 source_refs")
     return issues
 
 
@@ -241,31 +262,31 @@ def sanitize_report(report: CheckReport, *, valid_refs: set[str],
     """
     doc_check, risk, project_rules, tech_debt = [], [], [], []
 
-    for it in report.doc_check:
-        resolved = _resolve_evidence(it, valid_refs)
+    for dc_item in report.doc_check:
+        resolved = _resolve_evidence(dc_item, valid_refs)
         if resolved is None:
             continue
         refs, level = resolved
         refs, level = _enforce_doc_type("doc_check", refs, level, ref_doc_types)
-        doc_check.append(it.model_copy(update={
-            "basis": _normalize_text(it.basis, level),
-            "advice": _normalize_text(it.advice, level),
+        doc_check.append(dc_item.model_copy(update={
+            "basis": _normalize_text(dc_item.basis, level),
+            "advice": _normalize_text(dc_item.advice, level),
             "evidence_level": level, "source_refs": refs,
         }))
 
-    for it in report.risk:
-        resolved = _resolve_evidence(it, valid_refs)
+    for risk_item in report.risk:
+        resolved = _resolve_evidence(risk_item, valid_refs)
         if resolved is None:
             continue
         refs, level = resolved
         refs, level = _enforce_doc_type("risk", refs, level, ref_doc_types)
-        risk.append(it.model_copy(update={
-            "text": _normalize_text(it.text, level),
+        risk.append(risk_item.model_copy(update={
+            "text": _normalize_text(risk_item.text, level),
             "evidence_level": level, "source_refs": refs,
         }))
 
-    for it in report.project_rules:
-        resolved = _resolve_evidence(it, valid_refs)
+    for rule_item in report.project_rules:
+        resolved = _resolve_evidence(rule_item, valid_refs)
         if resolved is None:
             continue
         refs, level = resolved
@@ -274,29 +295,30 @@ def sanitize_report(report: CheckReport, *, valid_refs: set[str],
         # 文本必须按**最终**等级归一化——此前先按降级前的 C 级归一化再改等级，
         # 导致 N 级条目拿不到「无法判断」前缀，违反规则 7（validate_report 能查出
         # 这个不一致，只是它在生产链路里从未被调用）。
-        verdict, final_level = it.verdict, level
+        verdict: RuleVerdict = rule_item.verdict
+        final_level = level
         if verdict.value == "violation" and level not in _STRONG_LEVELS:
             verdict, final_level = RuleVerdict.UNKNOWN, EvidenceLevel.N
-        project_rules.append(it.model_copy(update={
-            "item": _normalize_text(it.item, final_level),
+        project_rules.append(rule_item.model_copy(update={
+            "item": _normalize_text(rule_item.item, final_level),
             "verdict": verdict,
             "evidence_level": final_level,
             "source_refs": refs,
         }))
 
-    for it in report.tech_debt:
+    for debt_item in report.tech_debt:
         # 强判定却无任何有效引用（规则 2 主动无证据 / 规则 3 引用无效）：
         # 本段特意**降级保留**而非丢弃——LLM 观察到的风险线索仍有价值。
-        if it.verdict.value in ("direct_match", "related") and not any(
-                r in valid_refs for r in it.source_refs):
-            tech_debt.append(it.model_copy(update={
-                "item": _normalize_text(it.item, EvidenceLevel.C),
+        if debt_item.verdict.value in ("direct_match", "related") and not any(
+                r in valid_refs for r in debt_item.source_refs):
+            tech_debt.append(debt_item.model_copy(update={
+                "item": _normalize_text(debt_item.item, EvidenceLevel.C),
                 "verdict": TechDebtVerdict.POSSIBLE,
                 "evidence_level": EvidenceLevel.C,
-                "source_refs": [r for r in it.source_refs if r in valid_refs],
+                "source_refs": [r for r in debt_item.source_refs if r in valid_refs],
             }))
             continue
-        resolved = _resolve_evidence(it, valid_refs)
+        resolved = _resolve_evidence(debt_item, valid_refs)
         if resolved is None:
             continue
         refs, level = resolved
@@ -305,12 +327,13 @@ def sanitize_report(report: CheckReport, *, valid_refs: set[str],
         # 类型不支撑（规则 4）时必须把**判定**一并降为 possible，而不只是降级等级
         # ——闸门按 verdict 求值，只降 level 会让强判定带着 C 级证据继续命中
         # debt:* 闸门，给出与结论无关的阻断理由。
-        verdict = it.verdict
-        if verdict.value in ("direct_match", "related") and level not in _STRONG_LEVELS:
-            verdict = TechDebtVerdict.POSSIBLE
-        tech_debt.append(it.model_copy(update={
-            "item": _normalize_text(it.item, level),
-            "verdict": verdict,
+        debt_verdict: TechDebtVerdict = debt_item.verdict
+        if debt_verdict.value in ("direct_match", "related") \
+                and level not in _STRONG_LEVELS:
+            debt_verdict = TechDebtVerdict.POSSIBLE
+        tech_debt.append(debt_item.model_copy(update={
+            "item": _normalize_text(debt_item.item, level),
+            "verdict": debt_verdict,
             "evidence_level": level,
             "source_refs": refs,
         }))

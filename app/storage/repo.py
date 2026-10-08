@@ -1,11 +1,17 @@
 """SQLite 持久化 CRUD：KB 文档 metadata + 反馈/闸门事件/分析缓存。
 
 所有敏感字段（Token）以加密字符串形式入参，本层不负责加密/解密。
+
+关于 ``col(...)``：SQLModel 的字段属性在静态类型里就是普通 ``str`` / ``int``
+（``KbDoc.id == x`` 会被推成 ``bool`` 而非 SQL 表达式），这是它的元类决定的，
+运行时正常但静态检查不认。因此凡是要进 ``where()`` / ``in_()`` 的列都用
+``col(KbDoc.id)`` 包一层——它是 SQLModel 提供的类型化入口，返回真正的列表达式。
+本文件统一走这条路径，避免逐处加 ``# type: ignore``。
 """
 from __future__ import annotations
 
 
-from sqlmodel import select
+from sqlmodel import col, select
 
 from app.domain.models import AnalysisCache, GateEvent, KbDoc, ReportFeedback
 from app.storage.sqlite import session_scope
@@ -27,22 +33,22 @@ def list_kb_docs(project: str | None = None, module: str | None = None,
     with session_scope() as s:
         stmt = select(KbDoc)
         if project:
-            stmt = stmt.where(KbDoc.project == project)
+            stmt = stmt.where(col(KbDoc.project) == project)
         if module:
-            stmt = stmt.where(KbDoc.module == module)
+            stmt = stmt.where(col(KbDoc.module) == module)
         if doc_type:
-            stmt = stmt.where(KbDoc.doc_type == doc_type)
+            stmt = stmt.where(col(KbDoc.doc_type) == doc_type)
         if status:
-            stmt = stmt.where(KbDoc.status == status)
+            stmt = stmt.where(col(KbDoc.status) == status)
         return list(s.exec(stmt).all())
 
 
 def list_stale_doc_ids(project: str | None = None) -> set[str]:
     """已标记 stale（过期）的文档 id；检索时用于剔除不再生效的来源。"""
     with session_scope() as s:
-        stmt = select(KbDoc).where(KbDoc.status == "stale")
+        stmt = select(KbDoc).where(col(KbDoc.status) == "stale")
         if project:
-            stmt = stmt.where(KbDoc.project == project)
+            stmt = stmt.where(col(KbDoc.project) == project)
         return {d.id for d in s.exec(stmt).all()}
 
 
@@ -57,7 +63,8 @@ def get_kb_docs_by_ids(ids) -> dict[str, KbDoc]:
     if not id_set:
         return {}
     with session_scope() as s:
-        return {d.id: d for d in s.exec(select(KbDoc).where(KbDoc.id.in_(id_set))).all()}
+        stmt = select(KbDoc).where(col(KbDoc.id).in_(id_set))
+        return {d.id: d for d in s.exec(stmt).all()}
 
 
 def delete_kb_doc(doc_id: str) -> bool:
@@ -69,7 +76,7 @@ def delete_kb_doc(doc_id: str) -> bool:
     from sqlmodel import delete as sql_delete
 
     with session_scope() as s:
-        result = s.exec(sql_delete(KbDoc).where(KbDoc.id == doc_id))
+        result = s.exec(sql_delete(KbDoc).where(col(KbDoc.id) == doc_id))
         s.commit()
         return bool(result.rowcount)
 
@@ -83,9 +90,10 @@ def mark_kb_docs_stale(project: str, module: str | None = None,
     """
     keep = keep_ids or set()
     with session_scope() as s:
-        stmt = select(KbDoc).where(KbDoc.project == project, KbDoc.status == "active")
+        stmt = select(KbDoc).where(
+            col(KbDoc.project) == project, col(KbDoc.status) == "active")
         if module:
-            stmt = stmt.where(KbDoc.module == module)
+            stmt = stmt.where(col(KbDoc.module) == module)
         marked: list[str] = []
         for doc in s.exec(stmt).all():
             if doc.id in keep:
@@ -99,8 +107,14 @@ def mark_kb_docs_stale(project: str, module: str | None = None,
 
 # ===== 反馈 / 闸门事件（R2） =====
 def _before_since(created_at: str, since: str | None) -> bool:
-    """created_at 早于 since 下界（应排除）时返回 True；since 为空表示不过滤。"""
-    return bool(since) and created_at < since
+    """created_at 早于 since 下界（应排除）时返回 True；since 为空表示不过滤。
+
+    拆成提前 return 而非 `bool(since) and created_at < since`：短路表达式里
+    mypy 无法把 ``str | None`` 收窄成 ``str``，拆开后类型自然对齐（行为等价）。
+    """
+    if not since:
+        return False
+    return created_at < since
 
 
 def upsert_feedback(rec: ReportFeedback) -> ReportFeedback:
@@ -116,7 +130,7 @@ def list_feedback(project: str | None = None, since: str | None = None
     with session_scope() as s:
         stmt = select(ReportFeedback)
         if project:
-            stmt = stmt.where(ReportFeedback.project == project)
+            stmt = stmt.where(col(ReportFeedback.project) == project)
         rows = list(s.exec(stmt).all())
     return [r for r in rows if not _before_since(r.created_at, since)]
 
@@ -134,7 +148,7 @@ def list_gate_events(project: str | None = None, since: str | None = None
     with session_scope() as s:
         stmt = select(GateEvent)
         if project:
-            stmt = stmt.where(GateEvent.project == project)
+            stmt = stmt.where(col(GateEvent.project) == project)
         rows = list(s.exec(stmt).all())
     return [r for r in rows if not _before_since(r.created_at, since)]
 
@@ -171,7 +185,7 @@ def clear_cache(project: str | None = None) -> int:
     with session_scope() as s:
         stmt = sql_delete(AnalysisCache)
         if project:
-            stmt = stmt.where(AnalysisCache.project == project)
+            stmt = stmt.where(col(AnalysisCache.project) == project)
         result = s.exec(stmt)
         s.commit()
         return int(result.rowcount or 0)
@@ -188,6 +202,6 @@ def prune_cache(max_entries: int = 500) -> int:
         rows.sort(key=lambda e: e.created_at)
         victims = rows[: len(rows) - max_entries]
         for v in victims:
-            s.exec(sql_delete(AnalysisCache).where(AnalysisCache.cache_key == v.cache_key))
+            s.exec(sql_delete(AnalysisCache).where(col(AnalysisCache.cache_key) == v.cache_key))
         s.commit()
         return len(victims)

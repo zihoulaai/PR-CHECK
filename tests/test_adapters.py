@@ -285,3 +285,71 @@ def test_search_requires_project():
     kb = _adapter_with_response(lambda r: httpx.Response(200, json={"hits": []}))
     with pytest.raises(KbError):
         kb.search(KBQuery(project=""))
+
+
+# ===== 响应形状校验：远端返回对象时不得静默当成「空列表」=====
+def test_json_items_rejects_non_list_shapes():
+    """`data or []` 遇 dict 会静默产出「空列表」。
+
+    看起来像「没有数据」，实际是「形状不对」——两者的排查方向完全不同：
+    前者要去查参数与分页，后者要去查接口契约与错误响应。因此形状不对必须显式
+    归一成空列表并可被单测钉住。
+    """
+    from app.adapters.http_git import json_items
+
+    assert json_items([{"a": 1}, {"b": 2}]) == [{"a": 1}, {"b": 2}]
+    # GitHub 搜索端点的报错形态
+    assert json_items({"message": "Bad credentials", "documentation_url": "..."}) == []
+    assert json_items(None) == []
+    assert json_items("unexpected string") == []
+    assert json_items(42) == []
+
+
+def test_list_projects_survives_error_object():
+    """远端返回 {"message": ...} 时 list_projects 应产出空列表而不是崩或误报「有数据」。"""
+    from app.adapters.base import GitCredential
+    from app.adapters.github import GitHubAdapter
+
+    adapter = GitHubAdapter("https://api.github.com", "tok")
+    adapter._conn = lambda cred: ("https://api.github.com", "tok")
+    adapter._headers = lambda token: {}
+    calls: list[str] = []
+
+    def fake_get(url, **kwargs):
+        calls.append(url)
+        return _FakeResp(200, {"message": "Bad credentials"})
+
+    import app.adapters.github as gh
+
+    original = gh.get
+    gh.get = fake_get
+    try:
+        assert adapter.list_projects(GitCredential(base_url="", token="")) == []
+    finally:
+        gh.get = original
+
+
+class _FakeResp:
+    def __init__(self, status: int, payload):
+        self.status_code = status
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_list_mrs_survives_error_object():
+    import app.adapters.gitlab as gl
+    from app.adapters.base import GitCredential
+    from app.adapters.gitlab import GitLabAdapter
+    from app.domain.schemas import ProjectRef
+
+    adapter = GitLabAdapter("https://gitlab.example.com", "tok")
+    adapter._conn = lambda cred: ("https://gitlab.example.com", "tok")
+    original = gl.get
+    gl.get = lambda url, **kwargs: _FakeResp(200, {"message": "404 Project Not Found"})
+    try:
+        assert adapter.list_mrs(
+            GitCredential(base_url="", token=""), ProjectRef(path="a/b")) == []
+    finally:
+        gl.get = original

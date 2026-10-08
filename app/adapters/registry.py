@@ -14,7 +14,12 @@ Git 平台路由键由 ``git_platform``（或 ``select_git_adapter`` 入参）�
 """
 from __future__ import annotations
 
-from app.adapters.base import GitPlatformAdapter, KnowledgeBase
+from app.adapters.base import (
+    GitPlatformAdapter,
+    GitPlatformAdapterFactory,
+    KnowledgeBase,
+    KnowledgeBaseFactory,
+)
 from app.adapters.dify_kb import DifyKBAdapter
 from app.adapters.github import GitHubAdapter
 from app.adapters.gitlab import GitLabAdapter
@@ -25,7 +30,10 @@ from app.config import Settings, dataset_mapping
 from app.domain.enums import Platform
 from app.errors import GitUnavailable, KbError
 
-PROVIDERS: dict[str, type[KnowledgeBase]] = {
+# 注册表存的是**类**，故按构造契约（Factory）标注而非实例协议：
+# 否则 mypy 会拿实例协议的空 __init__ 去校验 cls(base_url=...)，报出一堆
+# 与真实错误无关的「Unexpected keyword argument」。
+PROVIDERS: dict[str, type[KnowledgeBaseFactory]] = {
     "maas": MaaSVectorKBAdapter,
     "openai": OpenAIStyleKBAdapter,
     "dify": DifyKBAdapter,
@@ -34,7 +42,7 @@ PROVIDERS: dict[str, type[KnowledgeBase]] = {
 DEFAULT_PROVIDER = "maas"
 
 # Git 平台注册表：platform 取值 -> 适配器类（本地适配器无参数，单独处理）
-GIT_ADAPTERS: dict[str, type[GitPlatformAdapter]] = {
+GIT_ADAPTERS: dict[str, type[GitPlatformAdapterFactory]] = {
     Platform.GITHUB.value: GitHubAdapter,
     Platform.GITLAB.value: GitLabAdapter,
 }
@@ -72,7 +80,8 @@ def build_kb(s: Settings) -> KnowledgeBase | None:
     return _make_kb(cls, s, s.kb_index)
 
 
-def _make_kb(cls: type[KnowledgeBase], s: Settings, index: str | None) -> KnowledgeBase:
+def _make_kb(cls: type[KnowledgeBaseFactory], s: Settings,
+             index: str | None) -> KnowledgeBase:
     return cls(
         base_url=s.kb_base_url,
         api_key=s.kb_api_key,

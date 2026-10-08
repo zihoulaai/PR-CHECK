@@ -284,14 +284,19 @@ make typecheck-full  # mypy 全量（信息用，不设卡门）
 make mutation-check  # 变异检测（约 7~10 分钟）
 ```
 
-**mypy 是分档接入的**，只对实测 0 error 的目录设卡门：
+**mypy 卡门范围是整个 `app/`**（实测 0 error，45 个源文件）：
 
-| 范围 | error 数 | 是否卡门 |
-|---|---|---|
-| `app/domain` `app/report` `app/parser` `app/container.py` `app/cli.py` | 0 | 是 |
-| `app/storage` | 5（均在 `repo.py`，多为 SQLModel 动态属性的类型摩擦） | 否 |
-| `app/agent` | 17（`gate.py`/`evidence.py` 循环变量跨类型复用） | 否 |
-| `app/adapters` | 15（`Protocol` 变型、`model_copy` 弱返回值） | 否 |
+```bash
+make typecheck       # mypy app（卡门）
+make typecheck-tests # mypy tests（信息用，不设卡门）
+```
+
+曾分档接入（`domain`/`report`/`parser`/`cli` 先进门，`agent`/`adapters`/`storage` 挂账共 37 个 error），现已全部清零。清零过程中修掉的都是真实问题，不是类型洁癖：
+
+- `registry` 用实例协议标注「适配器类」→ 一堆与真实错误无关的 `Unexpected keyword argument`（拆出 Factory 协议解决）
+- `gate.py` / `evidence.py` 四段循环复用同一个 `it` / `verdict`，mypy 按首段钉死类型；具名化后顺带让「这一段处理哪类条目」变得可读
+- `json_body` 标注 `object` 导致下游任何遍历都报错 → 改 `Any` 并加 `json_items()` 形状校验（原先 `data or []` 遇对象会静默当成「没数据」）
+- SQLModel 字段静态类型就是普通 `str`/`int`，`KbDoc.id.in_(x)` 认不出 → 统一走 `col()`，而不是逐处加 `type: ignore`
 
 `tests/` 不做类型检查（94% 未标注，逐个补是纯体力活且几乎不产生缺陷发现）。
 
@@ -300,12 +305,14 @@ make mutation-check  # 变异检测（约 7~10 分钟）
 `tests/mutation_check.py` 会逐个注入已知缺陷（破坏一处真实逻辑），再跑 pytest 与评估两层，看**是否被抓到**：
 
 ```bash
-uv run python tests/mutation_check.py          # 全量（18 个变异体）
+uv run python tests/mutation_check.py          # 全量（28 个变异体）
 uv run python tests/mutation_check.py --list   # 清单
 uv run python tests/mutation_check.py --only 5 # 只跑第 5 个
 ```
 
-它捕捉的是「重构悄悄削弱了测试」——这类问题**不会让任何测试变红**，只有主动注入缺陷才会暴露。本项目历史上出现过「353 个测试全绿、但 Java 符号抽取实际全错」的状态（测试覆盖了调用链，却没有一条断言真正校验被调用的逻辑）。
+它捕捉的是「重构悄悄削弱了测试」——这类问题**不会让任何测试变红**，只有主动注入缺陷才会暴露。
+
+变异检测跑**三层**验证：`pytest` / `eval_harness` / `mypy`。第三层是必需的：有些「正确写法」运行期完全等价——`KbDoc.id.in_(x)` 与 `col(KbDoc.id).in_(x)` 行为一致，差别只在静态类型，这类改动前两层原理上抓不到。本项目历史上出现过「353 个测试全绿、但 Java 符号抽取实际全错」的状态（测试覆盖了调用链，却没有一条断言真正校验被调用的逻辑）。
 
 因耗时较长，它由 `.github/workflows/mutation.yml` 每日定时 + 手动触发，不挂 PR。
 

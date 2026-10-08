@@ -17,7 +17,7 @@ from app.adapters.base import (
     PRMetadata,
     ProjectItem,
 )
-from app.adapters.http_git import get, json_body, project_path, require_token
+from app.adapters.http_git import get, json_body, json_items, project_path, require_token
 from app.domain.enums import Platform
 from app.domain.schemas import MRRef, ProjectRef
 from app.errors import GitUnavailable, MrNotFound, ProjectNotFound
@@ -63,8 +63,9 @@ class GitHubAdapter:
             params = {"per_page": per_page, "page": page}
         data = json_body(get(url, headers=self._headers(token), params=params,
                              timeout=self.timeout))
+        # 搜索端点包在 {"items": [...]} 里，列表端点直接返回数组——两种形状都要认
         items = data.get("items") if isinstance(data, dict) else None
-        rows = items if items is not None else (data or [])
+        rows = json_items(items if items is not None else data)
         return [
             ProjectItem(
                 id=int(r.get("id") or 0),
@@ -93,7 +94,7 @@ class GitHubAdapter:
                 updated_at=p.get("updated_at") or "",
                 author=(p.get("user") or {}).get("login") or "",
             )
-            for p in (data or []) if isinstance(p, dict)
+            for p in json_items(data) if isinstance(p, dict)
         ]
 
     def get_mr(self, cred: GitCredential, ref: MRRef) -> PRMetadata:
